@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">How code mode answers one question, next to calling tools one by one</title>
+<desc id="d">For the question "What was our margin by product category last quarter?", calling tools one by one took Claude 7 calls and sent 258 KB of report rows through the model, 694k tokens in all. In code mode the model searched for the function, read its signature and sent one script; the script read 192 rows inside the sandbox and returned five totals, 26k tokens in all.</desc>
+<rect x="0.5" y="0.5" width="1199" height="599" rx="16" fill="#1a1a19" stroke="#3a3936"/>
+<text x="56" y="84" font-size="34" font-weight="700" fill="#f0efec">One question, asked two ways</text>
+<text x="56" y="120" font-size="19" fill="#c3c2b7">“What was our margin by product category last quarter?” Claude Code, Opus 5.5, same server and data.</text>
+<line x1="600.0" y1="160" x2="600.0" y2="560" stroke="#3a3936"/>
+<text x="56" y="186" font-size="22" font-weight="700" fill="#f0efec">Calling tools one by one</text>
+<text x="56" y="212" font-size="16" fill="#c3c2b7">Every result goes back through the model.</text>
+<rect x="56" y="238" width="128" height="236" rx="10" fill="#242422" stroke="#3a3936"/>
+<text x="120.0" y="268" font-size="17" font-weight="600" text-anchor="middle" fill="#f0efec">Model</text>
+<rect x="440" y="238" width="128" height="236" rx="10" fill="#242422" stroke="#3a3936"/>
+<text x="504.0" y="268" font-size="17" font-weight="600" text-anchor="middle" fill="#f0efec">MCP server</text>
+<text x="504.0" y="290" font-size="14" text-anchor="middle" fill="#c3c2b7">114 tools</text>
+<line x1="194" y1="272" x2="428" y2="272" stroke="#8f8e85" stroke-width="2"/>
+<path d="M430 272l-9 -5v10z" fill="#8f8e85"/>
+<text x="312.0" y="263" font-size="14" text-anchor="middle" fill="#c3c2b7">report-cogs, last quarter</text>
+<line x1="430" y1="324" x2="196" y2="324" stroke="#3987e5" stroke-width="2"/>
+<path d="M194 324l9 -5v10z" fill="#3987e5"/>
+<text x="312.0" y="315" font-size="14" text-anchor="middle" fill="#c3c2b7">192 rows · 126 KB</text>
+<line x1="194" y1="376" x2="428" y2="376" stroke="#8f8e85" stroke-width="2"/>
+<path d="M430 376l-9 -5v10z" fill="#8f8e85"/>
+<text x="312.0" y="367" font-size="14" text-anchor="middle" fill="#c3c2b7">report-cogs again, once per category</text>
+<line x1="430" y1="428" x2="196" y2="428" stroke="#3987e5" stroke-width="2"/>
+<path d="M194 428l9 -5v10z" fill="#3987e5"/>
+<text x="312.0" y="419" font-size="14" text-anchor="middle" fill="#c3c2b7">131 KB more</text>
+<text x="56" y="518" font-size="18" fill="#f0efec"><tspan font-weight="700">7 calls</tspan> · 258 KB through the model · <tspan font-weight="700">694k tokens</tspan></text>
+<text x="632" y="186" font-size="22" font-weight="700" fill="#f0efec">Code mode</text>
+<text x="632" y="212" font-size="16" fill="#c3c2b7">The model writes a script. Only its result comes back.</text>
+<rect x="632" y="238" width="128" height="236" rx="10" fill="#242422" stroke="#3a3936"/>
+<text x="696.0" y="268" font-size="17" font-weight="600" text-anchor="middle" fill="#f0efec">Model</text>
+<rect x="972" y="238" width="172" height="236" rx="10" fill="#242422" stroke="#3a3936"/>
+<text x="1058.0" y="268" font-size="17" font-weight="600" text-anchor="middle" fill="#f0efec">Sandbox</text>
+<text x="1058.0" y="290" font-size="14" text-anchor="middle" fill="#c3c2b7">runs the script</text>
+<rect x="986" y="358" width="144" height="102" rx="8" fill="#1a1a19" stroke="#3987e5" stroke-width="1.5"/>
+<text x="1058.0" y="388" font-size="15" font-weight="600" text-anchor="middle" fill="#f0efec">api.reportCogs()</text>
+<text x="1058.0" y="412" font-size="14" font-weight="400" text-anchor="middle" fill="#c3c2b7">reads 192 rows</text>
+<text x="1058.0" y="436" font-size="14" font-weight="400" text-anchor="middle" fill="#c3c2b7">sums by category</text>
+<line x1="770" y1="272" x2="960" y2="272" stroke="#8f8e85" stroke-width="2"/>
+<path d="M962 272l-9 -5v10z" fill="#8f8e85"/>
+<text x="866.0" y="263" font-size="14" text-anchor="middle" fill="#c3c2b7">search: find the function</text>
+<line x1="962" y1="324" x2="772" y2="324" stroke="#8f8e85" stroke-width="2"/>
+<path d="M770 324l9 -5v10z" fill="#8f8e85"/>
+<text x="866.0" y="315" font-size="14" text-anchor="middle" fill="#c3c2b7">its signature · 11 KB</text>
+<line x1="770" y1="376" x2="960" y2="376" stroke="#3987e5" stroke-width="2"/>
+<path d="M962 376l-9 -5v10z" fill="#3987e5"/>
+<text x="866.0" y="367" font-size="14" text-anchor="middle" fill="#c3c2b7">execute: one script</text>
+<line x1="962" y1="428" x2="772" y2="428" stroke="#3987e5" stroke-width="2"/>
+<path d="M770 428l9 -5v10z" fill="#3987e5"/>
+<text x="866.0" y="419" font-size="14" text-anchor="middle" fill="#c3c2b7">5 totals · 1.3 KB</text>
+<text x="632" y="518" font-size="18" fill="#f0efec"><tspan font-weight="700">3 calls</tspan> · 13 KB through the model · <tspan font-weight="700">26k tokens</tspan></text>
+</svg>

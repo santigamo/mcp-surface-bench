@@ -11,7 +11,7 @@
 <text x="56" y="344" font-size="16" fill="#52514e">Tools deferred by the client</text>
 <path d="M56 358h24a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-24z" fill="#2a78d6"/>
 <text x="96" y="377" font-size="19"><tspan font-weight="700" fill="#0b0b0b">37k</tspan><tspan dx="10" fill="#52514e">−92%</tspan></text>
-<text x="56" y="436" font-size="16" fill="#52514e">Code mode: two tools</text>
+<text x="56" y="436" font-size="16" fill="#52514e">Code mode: the model writes code</text>
 <path d="M56 450h16a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-16z" fill="#2a78d6"/>
 <text x="88" y="469" font-size="19"><tspan font-weight="700" fill="#0b0b0b">26k</tspan><tspan dx="10" fill="#52514e">−94%</tspan></text>
 <text x="636" y="212" font-size="21" font-weight="600" fill="#0b0b0b">Codex · GPT-6.2 Sol</text>
@@ -21,7 +21,7 @@
 <text x="636" y="344" font-size="16" fill="#52514e">Tools deferred by the client</text>
 <path d="M636 358h75a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-75z" fill="#2a78d6"/>
 <text x="727" y="377" font-size="19"><tspan font-weight="700" fill="#0b0b0b">103k</tspan><tspan dx="10" fill="#52514e">−72%</tspan></text>
-<text x="636" y="436" font-size="16" fill="#52514e">Code mode: two tools</text>
+<text x="636" y="436" font-size="16" fill="#52514e">Code mode: the model writes code</text>
 <path d="M636 450h45a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-45z" fill="#2a78d6"/>
 <text x="697" y="469" font-size="19"><tspan font-weight="700" fill="#0b0b0b">64k</tspan><tspan dx="10" fill="#52514e">−83%</tspan></text>
 <line x1="56" y1="552" x2="1144" y2="552" stroke="#e4e3df"/>

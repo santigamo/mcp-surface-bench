@@ -20,15 +20,80 @@
 
 ---
 
-I took a real MCP server with 114 tools, rebuilt it from its public docs over a made-up company, and ran
-its own 25 example prompts through Claude Code and Codex. Same tools, same data, same requests. The only
-thing that changes is what the model gets to see:
+I built this benchmark to answer one question: when an MCP server has many tools, what does each way of
+showing them to an agent cost, and does the agent still get the work done?
+
+To find out, I took a real MCP server with 114 tools, rebuilt it from its public docs over a made-up
+company, and ran its own 25 example prompts through Claude Code and Codex. Same tools, same data, same
+requests. The only thing that changes is what the model gets to see:
 
 | Arm | What the model sees |
 | --- | --- |
 | `direct` | Every tool, with its full definition, from the first request. |
 | `direct+search` | The same server, but the client holds the definitions back and the model searches for the tools it needs (Claude Code's tool search, Codex's default). |
-| `code` | Two tools: one searches the server's functions and returns their signatures, the other runs JavaScript that calls them ("code mode"). |
+| `code` | A typed API instead of a tool list ("code mode"). The model searches it, reads the signatures it needs and writes a script that calls the functions. Only what the script returns goes back to the model. |
+
+## How code mode works
+
+In code mode the server doesn't list its tools. It gives the model an API and a place to run code against it:
+
+1. **Search.** The model says what it needs and gets back the functions that match. Then it asks for the
+   full signature of the ones it'll use: the arguments, their docs and the shape of the result.
+2. **Write.** It sends one script. Inside it, `api.reportCogs(...)` is a normal async function, so the
+   script can page through results, filter, join and total.
+3. **Return.** The script runs in a sandbox next to the data. The rows never reach the model. Only what the
+   script returns does.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/code-mode-dark.svg">
+  <img src="assets/code-mode-light.svg" alt="For the question 'What was our margin by product category last quarter?', calling tools one by one took Claude 7 calls and sent 258 KB of report rows through the model, 694k tokens in all. In code mode it took 3 calls: a search, the function's signature and one script that read 192 rows in the sandbox and returned five totals. 13 KB went through the model, 26k tokens in all.">
+</picture>
+
+This is the script Claude wrote for that question in the pilot, as written (only reformatted):
+
+```js
+const args = { orderDatetime: { start: "2026-07-01", end: "2026-09-30" }, maxRowsLimit: 5000 };
+let rows = [], cursor, meta;
+do {
+  const r = await api.reportCogs({ ...args, ...(cursor ? { cursor } : {}) });
+  rows.push(...r.rows);
+  cursor = r.meta.truncated ? r.nextCursor : null;
+  meta = r.meta;
+} while (cursor);
+
+const cats = {};
+for (const x of rows) {
+  const c = cats[x.productCategory || "(none)"] ??= {
+    lines: 0, revenue: 0, costedRevenue: 0, costA: 0,
+    uncostedLines: 0, uncostedRevenue: 0, costedRevD: 0, costD: 0,
+  };
+  const p = +x.totalPrice;
+  c.lines++;
+  c.revenue += p;
+  if (x.totalCostActual != null) { c.costedRevenue += p; c.costA += +x.totalCostActual; }
+  else { c.uncostedLines++; c.uncostedRevenue += p; }
+  if (x.totalCostDefault != null) { c.costedRevD += p; c.costD += +x.totalCostDefault; }
+}
+
+const out = Object.entries(cats).map(([k, c]) => ({
+  category: k,
+  lines: c.lines,
+  revenue: c.revenue.toFixed(2),
+  costActual: c.costA.toFixed(2),
+  profitActual: (c.costedRevenue - c.costA).toFixed(2),
+  marginActualPct: c.costedRevenue ? ((c.costedRevenue - c.costA) / c.costedRevenue * 100).toFixed(1) : null,
+  marginDefaultPct: c.costedRevD ? ((c.costedRevD - c.costD) / c.costedRevD * 100).toFixed(1) : null,
+  uncostedLines: c.uncostedLines,
+  uncostedRevenue: c.uncostedRevenue.toFixed(2),
+})).sort((a, b) => b.revenue - a.revenue);
+
+return { total: rows.length, dateRange: meta.dateRange, out };
+```
+
+It follows the pages, keeps apart the lines that have no cost and returns five rows. Calling tools one by
+one, Claude got to the same answer by pulling the whole report and then pulling it again once per category.
+
+The catch is writes. A script that changes data gets approved as a whole, not change by change.
 
 ## The server
 
