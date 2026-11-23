@@ -39,7 +39,7 @@ so I could rebuild the tool list without guessing.
 
 I'm not affiliated with Distru and this never connects to their server. `bun run catalog` reads the public
 docs and builds the tool list from them, and the docs themselves aren't copied into this repo. Behind the
-tools there's a made-up company, generated for the day of the run, with handlers I wrote from the docs.
+tools there's a made-up company, generated for the day of the run, with handlers written from the docs.
 The tasks are the 25 example prompts in those docs ("Try asking"), unedited.
 
 ## Pilot results
@@ -73,7 +73,7 @@ What I found:
    tool upfront, 98% of what Claude processed was the tool list, read again on each turn. Deferring it cut
    the median from 467k to 37k tokens; code mode brought it to 26k. Codex went from 370k to 103k and 64k.
 2. **The arms got the work done about equally.** One run per task cannot separate them, and none of them
-   failed a task on Claude. Codex's single failure comes from my own setup: the agent and the mock
+   failed a task on Claude. Codex's single failure comes from the pilot's setup: the agent and the mock
    company were in different timezones. The runner handles that now.
 3. **Two of the 25 example prompts cannot be completed as asked without a follow-up question.**
    "Turn off ordering on the Bay Area menu": there is no such switch. Claude laid out the two closest
@@ -92,15 +92,18 @@ What this doesn't show:
 - The real server. The schemas are rebuilt from documentation tables, the data is invented, and 63 of the
   114 tools have a handler (the rest are listed, and refuse a call with a clear message; one call in 150 runs
   reached one).
-- A production design for code mode. The `code` arm is my own, and it runs model-written code in
+- A production design for code mode. The `code` arm is this repo's own design, and it runs model-written code in
   `node:vm`, which isn't a security boundary.
 
-The graders use no model. I had to fix them twice after reading the pilot's answers, because they were
-failing correct answers that added a helpful remark. I then graded the stored runs again, and each run
-keeps its earlier verdicts. [`suites/erp/README.md`](suites/erp/README.md) states every task's rule, its traps and
+The graders use no model. They needed fixing twice after the pilot, because they were failing correct
+answers that added a helpful remark. The stored runs were then graded again, and each run keeps its
+earlier verdicts. [`suites/erp/README.md`](suites/erp/README.md) states every task's rule, its traps and
 the readings fixed in advance for the ambiguous prompts.
 
-## How it is built
+## How it's built
+
+I built this with coding agents: I set the design, the rules and the checks, and agents wrote most of the
+code under review.
 
 | Path | What it does |
 | --- | --- |
