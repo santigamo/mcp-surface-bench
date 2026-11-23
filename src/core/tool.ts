@@ -20,8 +20,12 @@ export type Handler<W> = {
 
 export const defineTool = <W>(handler: Handler<W>): Handler<W> => handler;
 
-/** One named requirement of a task. A run passes when every check passes. */
-export type Check = { name: string; pass: boolean; detail?: string };
+/**
+ * One named requirement of a task. A run passes when every required check passes.
+ * `required: false` marks a check that is reported but does not decide the run, for a quality worth
+ * measuring that the request did not strictly ask for (the order of a ranking, say).
+ */
+export type Check = { name: string; pass: boolean; detail?: string; required?: boolean };
 
 export type Task<W> = {
   id: string;
