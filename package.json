@@ -7,7 +7,8 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "bench": "bun src/bench/run.ts",
-    "report": "bun src/bench/report.ts"
+    "report": "bun src/bench/report.ts",
+    "regrade": "bun src/bench/regrade.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

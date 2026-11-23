@@ -41,20 +41,29 @@ const codex: Client = {
 
   version: () => Bun.spawnSync([BIN, "--version"]).stdout.toString().trim(),
 
-  check(toolSearch) {
+  check({ toolSearch, model, effort }) {
     const problems: string[] = [];
-    if (toolSearch === "auto") problems.push("codex has no threshold mode for tool search: use --tool-search on (its default) or off");
+    if (effort !== null) {
+      const out = Bun.spawnSync([BIN, "debug", "models"], { env: baseEnv({ CODEX_HOME }) });
+      let catalog: Raw | null = null;
+      try { catalog = JSON.parse(out.stdout.toString()) as Raw; } catch {}
+      problems.push(...effortProblems(effort, model, catalog));
+    }
+    if (toolSearch === "auto") problems.push("codex has no threshold mode for tool search (+search=auto): use an arm with +search (its default deferral) or without it (tools registered directly)");
     if (!existsSync(join(CODEX_HOME, "auth.json"))) problems.push(`codex is not logged in for the benchmark: run \`CODEX_HOME=${CODEX_HOME} codex login\` (or set BENCH_CODEX_HOME)`);
     return problems;
   },
 
-  setup: (toolSearch) => [
+  setup: () => [
     `CODEX_HOME=${CODEX_HOME} and --ignore-user-config: none of ~/.codex (AGENTS.md, skills, plugins, MCP servers, hooks)`,
-    toolSearch === "off" ? "MCP tools registered directly (omit_tools_from code_mode and deferred)" : "MCP tools deferred inside Codex's code mode (its default)",
     `features off: ${FEATURES_OFF.join(", ")}; web_search disabled; skills.include_instructions=false`,
     "always present (model catalog): exec, wait, request_user_input, collaboration tools",
-    "codex exec does not report the model it used: without --model, runs record \"codex default\"",
+    "codex exec does not report the model it used: without --model, runs record \"codex default\", which the client version fixes",
+    "codex exec does not show its tool searches in its events, nor the reasoning effort it used (set by model_reasoning_effort)",
   ],
+
+  toolSearchSetting: (toolSearch) =>
+    toolSearch === "off" ? "MCP tools registered directly (omit_tools_from code_mode and deferred)" : "MCP tools deferred inside Codex's code mode (its default)",
 
   command(run: ClientRun): Command {
     const { name, command, args, env } = run.server;
@@ -67,7 +76,9 @@ const codex: Client = {
       'default_tools_approval_mode="approve"', // MCP calls run without asking anyone
       ...exposure,
     ].map((kv) => `mcp_servers.${name}.${kv}`);
-    const settings = ['approval_policy="never"', 'web_search="disabled"', "skills.include_instructions=false", ...FEATURES_OFF.map((f) => `features.${f}=false`), ...server];
+    const settings = [
+      ...(run.effort ? [`model_reasoning_effort=${q(run.effort)}`] : []), // without it, the model's default effort
+      'approval_policy="never"', 'web_search="disabled"', "skills.include_instructions=false", ...FEATURES_OFF.map((f) => `features.${f}=false`), ...server];
     return {
       argv: [
         BIN, "exec", "--json",
@@ -118,6 +129,27 @@ const codex: Client = {
     };
   },
 };
+
+/**
+ * Codex takes any string for `model_reasoning_effort` (neither `debug prompt-input` nor `doctor` checks it), so the
+ * levels come from its model catalog (`codex debug models`, bundled with the CLI): the named model's, or without
+ * --model the levels every listed model accepts, since the default model is not reported.
+ */
+export function effortProblems(effort: string, model: string | null, catalog: Raw | null): string[] {
+  const models = (catalog?.models ?? []) as Raw[];
+  if (!models.length) return ["codex debug models listed no model: cannot check the --effort level"];
+  const levels = (m: Raw) => ((m.supported_reasoning_levels ?? []) as Raw[]).map((l) => String(l.effort));
+  let accepted: string[];
+  if (model) {
+    const m = models.find((x) => x.slug === model);
+    if (!m) return [`codex's model catalog has no ${model}: cannot check the --effort level`];
+    accepted = levels(m);
+  } else {
+    const listed = models.filter((m) => m.visibility === "list").map(levels);
+    accepted = (listed[0] ?? []).filter((l) => listed.every((ls) => ls.includes(l)));
+  }
+  return accepted.includes(effort) ? [] : [`codex ${model ? `model ${model}` : "(its default model, not reported: the levels every listed model accepts)"} does not accept effort ${effort}; it accepts ${accepted.join(", ")}`];
+}
 
 /** Tool names from a rendered prompt input: `functions.exec`, `mcp__erp.distru_get_me`. */
 export function toolNames(input: Raw[]): string[] {

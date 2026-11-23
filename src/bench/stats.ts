@@ -28,6 +28,9 @@ export function usd(x: number): string {
   return `$${x.toPrecision(2)}`;
 }
 
+/** A fraction as a whole percentage: 0.934 is 93%. */
+export const share = (x: number) => `${Math.round(x * 100)}%`;
+
 /** `value [n]`, or a dash when no run carries the figure. */
 export function figure(xs: number[], summarise: (xs: number[]) => number | null, format: (x: number) => string): string {
   const v = summarise(xs);

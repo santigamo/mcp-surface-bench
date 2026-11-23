@@ -16,6 +16,8 @@ export type ClientRun = {
   cwd: string;
   /** Undefined: the client's default. */
   model?: string;
+  /** Reasoning effort. Undefined: the client's default, and nothing is passed. */
+  effort?: string;
   toolSearch: ToolSearch;
   /** The one MCP server the model may use. */
   server: ServerSpec;
@@ -38,8 +40,12 @@ export type Reading = {
   firstContext?: number;
   /** The model the client says it used. */
   model?: string;
+  /** The reasoning effort the client says it used. */
+  effort?: string;
   /** Tools the model started with, when the event stream says. */
   startTools?: string[];
+  /** The client's own tool searches, when the event stream shows them. */
+  toolSearches?: { total: number; beforeFirstCall: number };
   limitHit: boolean;
   error?: string;
 };
@@ -47,10 +53,15 @@ export type Reading = {
 export type Client = {
   name: string;
   version(): string;
-  /** Problems that stop a benchmark before it starts (not logged in, a setting this client cannot honour). */
-  check(toolSearch: ToolSearch): string[];
-  /** How this client is set up for the run, in words, for meta.json. */
-  setup(toolSearch: ToolSearch): string[];
+  /**
+   * Problems that stop a benchmark before it starts (not logged in, a setting this client cannot honour, an effort
+   * level it does not accept). Asked once per arm.
+   */
+  check(o: { toolSearch: ToolSearch; model: string | null; effort: string | null }): string[];
+  /** How this client is set up for every arm, in words, for meta.json. */
+  setup(): string[];
+  /** What an arm's tool search becomes in this client, in words: what the arm resolved to. */
+  toolSearchSetting(toolSearch: ToolSearch): string;
   command(run: ClientRun): Command;
   /**
    * The tools the model will be given, read without calling a model. For clients whose event stream does not say.

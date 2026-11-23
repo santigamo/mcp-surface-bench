@@ -1,7 +1,7 @@
-// The order of the runs: every (task, rep) block runs each surface once, in an order of its own drawn from the seed.
-import type { RunKey } from "./types.ts";
+// The order of the runs: every (task, rep) block runs each arm once, in an order of its own drawn from the seed.
+import type { Arm, RunKey } from "./types.ts";
 
-export type Planned = RunKey & { prompt: string; /** 0-based place of the surface within its block. */ position: number };
+export type Planned = RunKey & Omit<Arm, "name"> & { prompt: string; /** 0-based place of the arm within its block. */ position: number };
 
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -15,13 +15,13 @@ export function shuffle<T>(items: readonly T[], seed: number): T[] {
   return a;
 }
 
-export function plan(tasks: readonly { id: string; prompt: string }[], surfaces: readonly string[], n: number, seed: number): Planned[] {
+export function plan(tasks: readonly { id: string; prompt: string }[], arms: readonly Arm[], n: number, seed: number): Planned[] {
   const out: Planned[] = [];
   let block = 0;
   for (const task of tasks) {
     for (let rep = 1; rep <= n; rep++, block++) {
       // Each block's order comes from the seed and the block's number, so one block's order does not depend on another's.
-      shuffle(surfaces, (seed ^ Math.imul(block + 1, 0x9e3779b1)) >>> 0).forEach((surface, position) => out.push({ task: task.id, prompt: task.prompt, surface, rep, position }));
+      shuffle(arms, (seed ^ Math.imul(block + 1, 0x9e3779b1)) >>> 0).forEach(({ name, ...arm }, position) => out.push({ task: task.id, prompt: task.prompt, arm: name, ...arm, rep, position }));
     }
   }
   return out;

@@ -24,19 +24,20 @@ const claude: Client = {
 
   version: () => Bun.spawnSync([BIN, "--version"]).stdout.toString().trim(),
 
-  check() {
+  check({ effort }) {
     const status = Bun.spawnSync([BIN, "auth", "status"]);
     if (status.exitCode !== 0) return [`claude is not installed or not logged in (\`${BIN} auth status\` exited ${status.exitCode}); run \`claude auth login\``];
     try { if (!JSON.parse(status.stdout.toString()).loggedIn) return ["claude is not logged in; run `claude auth login`"]; } catch {}
-    return [];
+    return effort === null ? [] : effortProblems(effort, effortsFromHelp(Bun.spawnSync([BIN, "--help"]).stdout.toString()));
   },
 
-  setup: (toolSearch) => [
-    `ENABLE_TOOL_SEARCH=${TOOL_SEARCH[toolSearch].env}, --tools "${TOOL_SEARCH[toolSearch].tools}"`,
+  setup: () => [
     "--setting-sources \"\" and --strict-mcp-config: no user, project or local settings, plugins or other MCP servers",
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1, CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: no CLAUDE.md or memory files",
     "--disable-slash-commands: no skills or commands; --no-chrome; --no-session-persistence",
   ],
+
+  toolSearchSetting: (toolSearch) => `ENABLE_TOOL_SEARCH=${TOOL_SEARCH[toolSearch].env}, --tools "${TOOL_SEARCH[toolSearch].tools}"`,
 
   command(run: ClientRun): Command {
     const file = join(run.dir, "mcp.json");
@@ -48,6 +49,7 @@ const claude: Client = {
         BIN, "-p", run.prompt,
         "--output-format", "stream-json", "--verbose", // stream-json in print mode requires --verbose
         ...(run.model ? ["--model", run.model] : []),
+        ...(run.effort ? ["--effort", run.effort] : []), // without it, the model's default effort
         "--strict-mcp-config", "--mcp-config", file, // only this server: none from ~/.claude.json, plugins or claude.ai connectors
         "--setting-sources", "", // no settings files, so no hooks, plugins, permission rules or env blocks from the owner's machine
         "--disable-slash-commands", // no skills
@@ -74,6 +76,8 @@ const claude: Client = {
     // Claude Code emits one assistant event per content block, each repeating the message's usage.
     const perMessage = new Map<string, Usage>();
     const toolUses = new Set<string>();
+    // In call order: each ToolSearch, and whether the model had called the server yet.
+    let searches = 0, searchesBeforeServer = 0, calledServer = false;
     for (const e of events as Raw[]) {
       if (e?.type === "system" && e.subtype === "init") init = e;
       else if (e?.type === "rate_limit_event" && e.rate_limit_info?.status === "rejected") rejected = true;
@@ -86,7 +90,11 @@ const claude: Client = {
           perMessage.set(m.id ?? `#${perMessage.size}`, prev ? maxUsage(prev, u) : u);
         }
         for (const c of m.content ?? []) {
-          if (c.type === "tool_use") toolUses.add(c.id);
+          if (c.type === "tool_use" && !toolUses.has(c.id)) {
+            toolUses.add(c.id);
+            if (c.name === "ToolSearch") { searches++; if (!calledServer) searchesBeforeServer++; }
+            else if (String(c.name).startsWith("mcp__")) calledServer = true;
+          }
           if (c.type === "text" && c.text) lastText = c.text;
         }
       } else if (e?.type === "result") result = e;
@@ -105,11 +113,26 @@ const claude: Client = {
       ...(firstContext !== undefined ? { firstContext } : {}),
       ...(typeof init?.model === "string" ? { model: init.model } : {}),
       ...(Array.isArray(init?.tools) ? { startTools: init.tools as string[] } : {}),
+      toolSearches: { total: searches, beforeFirstCall: searchesBeforeServer },
       limitHit: rejected || LIMIT_TEXT.test(error ?? ""),
       ...(error ? { error } : {}),
     };
   },
 };
+
+/**
+ * The levels `--effort` accepts, from the installed version's own help: `--effort <level>  Effort level for the
+ * current session (low, medium, high, xhigh, max)`. Null when the help does not list them.
+ */
+export function effortsFromHelp(help: string): string[] | null {
+  const listed = /--effort <level>[^(]{0,200}\(([a-z, ]+)\)/.exec(help)?.[1];
+  return listed ? listed.split(",").map((s) => s.trim()).filter(Boolean) : null;
+}
+
+export function effortProblems(effort: string, accepted: string[] | null): string[] {
+  if (!accepted) return ["claude --help does not list the levels of --effort on this version: check it accepts one before passing --effort"];
+  return accepted.includes(effort) ? [] : [`claude does not accept --effort ${effort}; it accepts ${accepted.join(", ")}`];
+}
 
 function toUsage(u: Raw): Usage {
   const input = u.input_tokens ?? 0, cacheRead = u.cache_read_input_tokens ?? 0, cacheCreation = u.cache_creation_input_tokens ?? 0, output = u.output_tokens ?? 0;

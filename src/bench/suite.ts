@@ -28,3 +28,6 @@ export function selectTasks(wanted: string[] | "all"): Task<World>[] {
 
 /** An ungraded task. Its id comes from the text, so a different prompt under the same label is a different run. */
 export const adHoc = (prompt: string) => ({ id: `prompt-${createHash("sha256").update(prompt).digest("hex").slice(0, 8)}`, prompt });
+
+/** The world's fingerprint: two benchmarks, or a benchmark and its resumption, start from the same world when these match. */
+export const worldHash = (world: unknown) => createHash("sha256").update(JSON.stringify(world)).digest("hex");
