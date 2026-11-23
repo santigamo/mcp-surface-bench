@@ -1,0 +1,5 @@
+node_modules/
+# Vendor documentation and everything derived from it: fetched locally, never redistributed.
+vendor/
+results/
+.DS_Store
