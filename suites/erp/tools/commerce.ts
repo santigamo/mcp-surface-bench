@@ -1,11 +1,8 @@
 // Wholesale menus: the menus themselves, their settings, and the products buyers see on them.
-import { matches, money, normalizeId, normalizeIds, page, qty, sorted, type SortBy } from "../../../src/core/kit.ts";
+import { closeness, inList, inStatus, money, normalizeId, normalizeIds, page, qty, ranked, sorted, tiers, type SortBy, type Status } from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
 import { availableQuantity, fullName, PREFIX, type Category, type Id, type Menu, type Product, type World } from "../world.ts";
-import { find, named, recordAction, stamp, type C } from "./shared.ts";
-
-type Status = "ACTIVE" | "ANY" | "INACTIVE";
-const inStatus = (status: Status = "ACTIVE", active: boolean) => status === "ANY" || (status === "ACTIVE") === active;
+import { categoryOf, find, named, recordAction, stamp, type C } from "./shared.ts";
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
@@ -96,7 +93,6 @@ type Listing = { product: Product; addedAt: string };
 const listings = (w: World, m: Menu): Listing[] =>
   m.products.map((x) => ({ product: w.products.find((p) => p.id === x.productId)!, addedAt: x.addedAt })).filter((x) => x.product.active);
 
-const categoryOf = (w: World, p: Product) => w.categories.find((c) => c.id === p.categoryId)!;
 const strainOf = (w: World, p: Product) => w.strains.find((s) => s.id === p.strainId) ?? null;
 
 /** A product as a menu shows it. */
@@ -197,26 +193,25 @@ function productFilter(w: World, args: MenuProductArgs): (p: Product) => boolean
   const strainIds = normalizeIds(args.strainIds, PREFIX.strain);
   const brandIds = normalizeIds(args.brandIds, PREFIX.company);
   const groupIds = normalizeIds(args.productGroupIds, PREFIX.group);
-  const oneOf = (wanted: string[] | undefined, value: string | null | undefined) => !wanted || (value != null && wanted.includes(value));
   return (p) =>
     (!byCategory || byCategory(p)) &&
-    oneOf(args.strainTypes, strainOf(w, p)?.strainType) &&
-    oneOf(strainIds, p.strainId) &&
-    oneOf(brandIds, p.brandId) &&
-    oneOf(groupIds, p.groupId) &&
-    searchMatch(w, args.search, p) !== undefined;
+    inList(args.strainTypes, strainOf(w, p)?.strainType) &&
+    inList(strainIds, p.strainId) &&
+    inList(brandIds, p.brandId) &&
+    inList(groupIds, p.groupId) &&
+    (!args.search || relevance(w, args.search, p) !== undefined);
 }
 
 /**
- * How well a product matches `search`: 0 for its name, 1 for any other searched field, undefined for no match.
- * Product groups are left out: the world does not model which menus allow filtering by group.
+ * How relevant a product is to `search`, lower first, undefined for no match: a match on its name ranks first, by
+ * closeness, then a match on any other searched field. Product groups are left out: the world does not model which
+ * menus allow filtering by group.
  */
-function searchMatch(w: World, search: string | undefined, p: Product): number | undefined {
-  if (!search || matches(search, p.name)) return 0;
+function relevance(w: World, search: string, p: Product): number | undefined {
   const category = categoryOf(w, p);
   const strain = strainOf(w, p);
   const others = [p.sku, strain?.name, strain?.strainType, named(w.companies, p.brandId)?.name, category.name, named(category.subcategories, p.subcategoryId)?.name, category.official];
-  return matches(search, ...others) ? 1 : undefined;
+  return tiers(closeness(search, [p.name]), closeness(search, others));
 }
 
 // ---------- mutate-menu ----------
@@ -292,7 +287,7 @@ function updateMenu(c: C, args: MutateArgs) {
   const changed = (Object.keys(patch) as Editable[]).filter((k) => patch[k] !== menu[k]);
   const fields = changed.map((k) => ({ field: k, label: EDITABLE[k], oldValue: shown(w, k, menu[k]), newValue: shown(w, k, patch[k]) }));
   Object.assign(menu, patch, { updatedAt: stamp(c) });
-  recordAction(c, [{ type: "MENU", id: menu.id, name: menu.name, op: "UPDATE", rowLabel: null, fields }]);
+  recordAction(c, [{ type: "MENU", id: menu.id, name: menu.name, entity: "MENU", rowId: menu.id, op: "UPDATE", rowLabel: null, fields }]);
   return { menu: menuSettings(w, menu, true) };
 }
 
@@ -304,13 +299,9 @@ export const tools = [
     supports: ["limit", "cursor", "ids", "search", "status", "visibility", "sortBy"],
     run(args: { limit?: number; cursor?: string; ids?: string[]; search?: string; status?: Status; visibility?: Menu["visibility"]; sortBy?: SortBy }, { world: w }) {
       const ids = normalizeIds(args.ids, PREFIX.menu);
-      const menus = w.menus.filter(
-        (m) => (!ids || ids.includes(m.id)) && inStatus(args.status, m.active) && (!args.visibility || m.visibility === args.visibility) && matches(args.search, m.name, m.externalName),
-      );
-      // With `search`, the closest names first: those the search covers more of.
-      const closeness = (m: Menu) => Math.max(...[m.name, m.externalName].filter((n) => matches(args.search, n)).map((n) => args.search!.length / n.length));
+      const menus = w.menus.filter((m) => inList(ids, m.id) && inStatus(args.status, m.active) && (!args.visibility || m.visibility === args.visibility));
       const ordered = args.search
-        ? [...menus].sort((a, b) => closeness(b) - closeness(a))
+        ? ranked(menus, (m) => closeness(args.search!, [m.name, m.externalName]))
         : sorted(menus, args.sortBy, { INSERTED_AT: (m) => Date.parse(m.createdAt), NAME: (m) => m.name, UPDATED_AT: (m) => Date.parse(m.updatedAt) }, { field: "UPDATED_AT", direction: "DESC" });
       return page(ordered, args, (m) => menuRow(w, m));
     },
@@ -340,7 +331,7 @@ export const tools = [
       const found = scope.filter((x) => keep(x.product));
       // UPDATED_AT is when the listing last changed; a listing here changes only when the product is added.
       const ordered = args.search
-        ? [...found].sort((a, b) => searchMatch(w, args.search, a.product)! - searchMatch(w, args.search, b.product)!)
+        ? ranked(found, (x) => relevance(w, args.search!, x.product))
         : sorted(found, args.sortBy, { INSERTED_AT: (x) => Date.parse(x.addedAt), UPDATED_AT: (x) => Date.parse(x.addedAt), PRODUCT_NAME: (x) => x.product.name }, { field: "UPDATED_AT", direction: "DESC" });
       return {
         ...page(ordered, args, (x) => menuProduct(w, menu, x.product)),

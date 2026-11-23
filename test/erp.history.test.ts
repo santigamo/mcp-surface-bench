@@ -25,7 +25,8 @@ test("get-record-history answers who changed the price on SO-1042, and when", ()
     type: "CHANGE", actor: { id: "usr_3", name: "Priya Nair", companyName: null }, source: "WEB", sourceDetail: null, rowCount: 1, truncated: false, events: [],
     rows: [{ entity: "ORDER_ITEM", entityLabel: "Order item", op: "UPDATE", rowLabel: "Wedding Cake 3.5g", fields: [{ field: "priceBase", label: "Price", oldValue: "24.00", newValue: "19.50" }] }],
   });
-  expect(price[0].rows[0].rowId).toBeUndefined();
+  // The order line keeps its id, which the sales order tools print.
+  expect(price[0].rows[0].rowId).toBe(world.salesOrders.find((o) => o.orderNumber === "SO-1042")!.items[0]!.id);
   expect(price[0].changedAt).toMatch(/^\d{4}-\d{2}-\d{2}T14:37:00-0[78]:00$/);
   const own = history.items.find((e: any) => e.rows[0].entity === "SALES_ORDER" && e.rows[0].op === "UPDATE").rows[0];
   expect(own.rowId).toBe(orderId(world, "SO-1042"));
@@ -126,9 +127,10 @@ test("search-activity refuses ranges the documentation does not allow", () => {
 test("both tools show what the MCP write tools logged", () => {
   const { call, world } = bench();
   const so = orderId(world, "SO-4512");
+  const line = world.salesOrders.find((o) => o.id === so)!.items[0]!.id;
   write(world, [
-    { type: "SALES_ORDER", id: so, name: "SO-4512", op: "UPDATE", rowLabel: "Blue Dream 7g", fields: [{ field: "quantity", label: "Quantity", oldValue: "60", newValue: "50" }] },
-    { type: "SALES_ORDER", id: so, name: "SO-4512", op: "UPDATE", rowLabel: null, fields: [{ field: "internalNotes", label: "Internal notes", oldValue: null, newValue: "Short 10" }] },
+    { type: "SALES_ORDER", id: so, name: "SO-4512", entity: "ORDER_ITEM", rowId: line, op: "UPDATE", rowLabel: "Blue Dream 7g", fields: [{ field: "quantity", label: "Quantity", oldValue: "60", newValue: "50" }] },
+    { type: "SALES_ORDER", id: so, name: "SO-4512", entity: "SALES_ORDER", rowId: so, op: "UPDATE", rowLabel: null, fields: [{ field: "internalNotes", label: "Internal notes", oldValue: null, newValue: "Short 10" }] },
   ]);
   const latest = call("get-record-history", { recordType: "SALES_ORDER", recordId: so }).items[0];
   expect(latest).toMatchObject({ actor: { id: "usr_1", name: "Maya Okafor" }, source: "MCP", rowCount: 2 });
@@ -137,21 +139,33 @@ test("both tools show what the MCP write tools logged", () => {
   expect(feed.items[0].records).toEqual([{ type: "SALES_ORDER", id: so, name: "SO-4512", op: "UPDATE", changedFields: ["orderItem.quantity", "internalNotes"], rowCount: 2, truncated: false }]);
 });
 
-test("records logged under the world's names show under the documented record types", () => {
+test("what the write tools log shows in the history of the record it belongs to", () => {
   const { call, world } = bench();
   const po = world.purchaseOrders.find((p) => p.purchaseNumber === "PO-1182")!;
-  const emailed = { op: "UPDATE" as const, rowLabel: null, fields: [{ field: "emailedTo", label: "Emailed to", oldValue: null, newValue: "ap@example.com" }] };
-  write(world, [{ type: "PURCHASE_ORDER", id: po.id, name: po.purchaseNumber, ...emailed }]);
-  write(world, [{ type: "METRC_MANIFEST", id: "0001234567", name: "0001234567", ...emailed }]);
-  expect(call("get-record-history", { recordType: "PURCHASE", recordId: po.id }).items[0].rows[0]).toMatchObject({ entity: "PURCHASE", rowId: po.id });
+  // A purchase payment is a line of its purchase order.
+  const { purchasePayment } = call("create-purchase-payment", { purchaseId: po.id, amount: 2500, paymentMethodId: world.paymentMethods[0]!.id });
+  const paid = call("get-record-history", { recordType: "PURCHASE", recordId: po.id }).items[0];
+  expect(paid.rows).toEqual([{ entity: "PURCHASE_PAYMENT", entityLabel: "Purchase payment", op: "INSERT", rowId: purchasePayment.id, rowLabel: purchasePayment.paymentNumber, fields: expect.any(Array) }]);
+  expect(call("search-activity", { ids: [paid.id] }).items[0].records).toMatchObject([{ type: "PURCHASE", id: po.id, name: "PO-1182", op: "UPDATE", changedFields: expect.arrayContaining(["purchasePayment.amount"]) }]);
+  // A contact is a line of its company.
+  const sunset = world.companies.find((c) => c.name === "Sunset Dispensary")!;
+  const { contact } = call("mutate-company-contact", { action: "CREATE", companyId: sunset.id, firstName: "Jane", lastName: "Lee", title: "Purchasing manager" });
+  expect(call("get-record-history", { recordType: "COMPANY", recordId: sunset.id }).items[0].rows[0]).toMatchObject({ entity: "CONTACT", op: "INSERT", rowId: contact.id, rowLabel: "Jane Lee" });
+  // An emailed invoice keeps the addresses; a manifest is a COMPLIANCE_TRANSFER, found by its number.
+  const invoice = world.invoices.find((i) => i.invoiceNumber === "INV-4512")!;
+  call("email-pdf", { document: "INVOICE", id: invoice.id, emailAddresses: ["noah.kim@baysidebotanicals.example"] });
+  expect(call("get-record-history", { recordType: "INVOICE", recordId: invoice.id }).items[0].rows).toEqual([
+    { entity: "INVOICE_RECIPIENT_EMAIL", entityLabel: "Invoice recipient email", op: "INSERT", rowLabel: "noah.kim@baysidebotanicals.example", fields: [{ field: "email", label: "Email", oldValue: null, newValue: "noah.kim@baysidebotanicals.example" }] },
+  ]);
+  call("email-pdf", { document: "METRC_MANIFEST", id: "0001234567", emailAddresses: ["receiving@tidewatercannabis.example"] });
   expect(call("get-record-history", { recordType: "COMPLIANCE_TRANSFER", recordId: "0001234567" }).items).toHaveLength(1);
-  const feed = call("search-activity", { sources: ["MCP"], recordTypes: ["PURCHASE", "COMPLIANCE_TRANSFER"] });
-  expect(feed.items.map((e: any) => e.records[0].type).sort()).toEqual(["COMPLIANCE_TRANSFER", "PURCHASE"]);
+  const feed = call("search-activity", { sources: ["MCP"], recordTypes: ["PURCHASE", "COMPLIANCE_TRANSFER", "COMPANY", "INVOICE"] });
+  expect(feed.items.map((e: any) => e.records[0].type).sort()).toEqual(["COMPANY", "COMPLIANCE_TRANSFER", "INVOICE", "PURCHASE"]);
 });
 
 test("search-activity counts every record past the 50-row cap, and shows a deleted record by its last name", () => {
   const { call, world } = bench();
-  const tags = Array.from({ length: 52 }, (_, i) => ({ type: "TAG", id: `tag_${100 + i}`, name: `Promo ${i}`, op: "INSERT" as const, rowLabel: null, fields: [] }));
+  const tags = Array.from({ length: 52 }, (_, i) => ({ type: "TAG" as const, id: `tag_${100 + i}`, name: `Promo ${i}`, entity: "TAG" as const, rowId: `tag_${100 + i}`, op: "INSERT" as const, rowLabel: null, fields: [] }));
   write(world, tags);
   const big = call("search-activity", { sources: ["MCP"], changedAt: { start: TODAY } }).items[0];
   expect([big.rowCount, big.truncated, big.records.length, big.recordCounts]).toEqual([52, true, 50, [{ type: "TAG", count: 52 }]]);

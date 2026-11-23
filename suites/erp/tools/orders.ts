@@ -1,12 +1,20 @@
 // Sales orders, invoices and invoice payments, the sales and invoice reports, and the PDFs of those documents.
 import { createHash } from "node:crypto";
-import { addDays, bound, dayIn, isoIn, matches, money, normalizeId, normalizeIds, page, qty, report, sorted, within, type SortBy } from "../../../src/core/kit.ts";
+import {
+  bound, closeness, dayIn, describeRanges, inList, isoIn, lastDays, like, matches, money, normalizeId, normalizeIds, page, qty, ranked, report, sorted, tiers, within,
+  type DateSpan as Span, type SortBy,
+} from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
-import { PREFIX, invoiceMoney, orderCost, orderTotal, type Id, type Invoice, type InvoicePayment, type OrderStatus, type PaymentStatus, type Product, type SalesOrder, type World } from "../world.ts";
-import { find, named, recordAction, stamp, userRef, type C } from "./shared.ts";
+import {
+  PREFIX, invoiceMoney, lastChanged, orderCost, orderMoney, orderTotal, paymentUpdatedAt,
+  type ActionRow, type Id, type Invoice, type InvoicePayment, type OrderStatus, type PaymentStatus, type Product, type RecordType, type SalesOrder, type World,
+} from "../world.ts";
+import {
+  categoryOf, customFieldValues, find, named, productFilter, productOf, recordAction, recordUrl, reportCustomFields, stamp, subcategoryName, userName, userRef,
+  type C, type ProductFilters,
+} from "./shared.ts";
 
 type Line = SalesOrder["items"][number];
-type Span = { start?: string; end?: string };
 type Range = { min?: number; max?: number };
 type Paging = { limit?: number; cursor?: string };
 type ReportPaging = { maxRowsLimit?: number; cursor?: string };
@@ -23,11 +31,9 @@ const ORDER_PAYMENT: Record<PaymentStatus, string> = { NOT_PAID: "NOT_PAID", PAR
 const REPORT_PAYMENT: Record<PaymentStatus, string> = { NOT_PAID: "NOT_PAID", PARTIALLY_PAID: "PARTIALLY_PAID", PAID: "FULLY_PAID", OVER_PAID: "OVER_PAID" };
 
 const time = (iso: string) => Date.parse(iso);
-const productOf = (w: World, id: Id) => w.products.find((p) => p.id === id)!;
 const orderOf = (w: World, inv: Invoice) => w.salesOrders.find((o) => o.id === inv.salesOrderId)!;
 const invoicesOf = (w: World, o: SalesOrder) => w.invoices.filter((i) => i.salesOrderId === o.id);
 const customerName = (w: World, id: Id) => named(w.companies, id)?.name ?? null;
-const userName = (w: World, id: Id | null) => userRef(w, id)?.profile.fullName ?? null;
 const shipped = (o: SalesOrder) => o.deliveryDatetime !== null;
 
 function licenseOf(w: World, o: SalesOrder) {
@@ -35,31 +41,19 @@ function licenseOf(w: World, o: SalesOrder) {
   return w.licenses.find((l) => l.id === location?.licenseId);
 }
 
-/** The latest of a record's own instants and of the changes the activity log holds for it. */
-function lastChange(w: World, id: Id, ...instants: (string | null)[]): string {
-  const logged = w.actions.filter((a) => a.records.some((r) => r.id === id)).map((a) => a.changedAt);
-  return [...instants, ...logged].filter((x): x is string => x !== null).reduce((a, b) => (time(b) > time(a) ? b : a));
-}
-
-const orderUpdated = (w: World, o: SalesOrder) => lastChange(w, o.id, o.orderDatetime, o.deliveryDatetime);
+const orderUpdated = (w: World, o: SalesOrder) => lastChanged(w, "SALES_ORDER", o.id, o.orderDatetime, o.deliveryDatetime);
+/** An invoice changes with its payments too: when one is recorded or voided. */
 const invoiceUpdated = (w: World, inv: Invoice) =>
-  lastChange(w, inv.id, inv.invoiceDatetime, ...w.invoicePayments.filter((p) => p.invoiceId === inv.id).map((p) => p.paymentDatetime));
-
-/** What an order has been paid: its invoice's payments, or nothing before it is invoiced. */
-function orderMoney(w: World, o: SalesOrder): { total: number; paid: number; status: PaymentStatus } {
-  const inv = invoicesOf(w, o)[0];
-  return inv ? invoiceMoney(w, inv) : { total: orderTotal(o), paid: 0, status: "NOT_PAID" };
-}
+  lastChanged(w, "INVOICE", inv.id, inv.invoiceDatetime, ...w.invoicePayments.filter((p) => p.invoiceId === inv.id).map((p) => paymentUpdatedAt(p)));
 
 /** API for an order the public API created; every other order was entered by a user. */
 const orderSource = (w: World, o: SalesOrder) =>
-  w.actions.some((a) => a.source === "PUBLIC_API" && a.records.some((r) => r.id === o.id && r.op === "INSERT")) ? "API" : "INTERNAL_USER";
+  w.actions.some((a) => a.source === "PUBLIC_API" && a.records.some((r) => r.type === "SALES_ORDER" && r.id === o.id && r.entity === "SALES_ORDER" && r.op === "INSERT")) ? "API" : "INTERNAL_USER";
 
 function productFacts(w: World, p: Product) {
-  const category = w.categories.find((c) => c.id === p.categoryId)!;
   return {
-    category: category.name,
-    subcategory: category.subcategories.find((s) => s.id === p.subcategoryId)?.name ?? null,
+    category: categoryOf(w, p).name,
+    subcategory: subcategoryName(w, p),
     group: named(w.groups, p.groupId)?.name ?? null,
     brand: named(w.companies, p.brandId)?.name ?? null,
     // Documented as always present; every product in this world has a vendor.
@@ -70,7 +64,6 @@ function productFacts(w: World, p: Product) {
 
 // ---------- filters ----------
 
-const oneOf = (wanted: readonly unknown[] | undefined, value: unknown) => !wanted || wanted.includes(value);
 const between = (n: number, r: Range | undefined) => (r?.min === undefined || n >= r.min) && (r?.max === undefined || n <= r.max);
 const inSpan = (w: World, iso: string | null, s: Span | undefined) => within(iso, bound(s?.start, "after", w.timezone), bound(s?.end, "before", w.timezone));
 
@@ -80,12 +73,6 @@ function amount(value: string | number | undefined, input: string): number | und
   const n = Number(value);
   if (!Number.isFinite(n)) throw new ToolError(`${input} must be a dollar amount, e.g. 250 or "250.00".`);
   return n;
-}
-
-/** A case-insensitive substring pattern where % matches any run of characters and _ any one character. */
-function wildcard(term: string): RegExp {
-  const source = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("%", ".*").replaceAll("_", ".");
-  return new RegExp(source, "i");
 }
 
 /** Order-level filters, resolved from whichever input names a tool uses. */
@@ -102,34 +89,33 @@ type OrderQuery = {
 };
 
 /** True when no ids are given, or when a line of the order has one of them. */
-const hasLine = (o: SalesOrder, ids: Id[] | undefined, of: (i: Line) => Id | null) => !ids || o.items.some((i) => oneOf(ids, of(i)));
+const hasLine = (o: SalesOrder, ids: Id[] | undefined, of: (i: Line) => Id | null) => !ids || o.items.some((i) => inList(ids, of(i)));
 
 function orderMatches(w: World, o: SalesOrder, q: OrderQuery): boolean {
-  return oneOf(q.ids, o.id) && oneOf(q.customerIds, o.customerId) && !q.excludeCustomerIds?.includes(o.customerId)
-    && oneOf(q.customerGroupIds, w.companies.find((c) => c.id === o.customerId)?.groupId)
-    && oneOf(q.ownerIds, o.ownerId) && oneOf(q.menuIds, o.menuId) && oneOf(q.licenseIds, licenseOf(w, o)?.id)
+  return inList(q.ids, o.id) && inList(q.customerIds, o.customerId) && !q.excludeCustomerIds?.includes(o.customerId)
+    && inList(q.customerGroupIds, w.companies.find((c) => c.id === o.customerId)?.groupId)
+    && inList(q.ownerIds, o.ownerId) && inList(q.menuIds, o.menuId) && inList(q.licenseIds, licenseOf(w, o)?.id)
     && hasLine(o, q.productIds, (i) => i.productId) && hasLine(o, q.batchIds, (i) => i.batchId) && hasLine(o, q.brandIds, (i) => productOf(w, i.productId).brandId)
-    && oneOf(q.statuses, o.status) && oneOf(q.payment, ORDER_PAYMENT[orderMoney(w, o).status])
+    && inList(q.statuses, o.status) && inList(q.payment, ORDER_PAYMENT[orderMoney(w, o).status])
     && inSpan(w, o.orderDatetime, q.ordered) && inSpan(w, o.deliveryDatetime, q.delivered) && inSpan(w, o.dueDatetime, q.due) && between(orderTotal(o), q.total)
     // No order in this world is record-only or matched to a Metrc transfer.
     && !q.recordOnly && !q.matchedWithComplianceTransfer
-    && oneOf(q.sources, orderSource(w, o)) && (!q.search || q.search(o));
+    && inList(q.sources, orderSource(w, o)) && (!q.search || q.search(o));
 }
 
 /** Order number or customer name, case-insensitive; the reports skip the name for terms under two characters. */
 const orderSearch = (w: World, term: string | undefined, nameMinLength = 0) =>
   term === undefined ? undefined : (o: SalesOrder) => matches(term, o.orderNumber) || (term.length >= nameMinLength && matches(term, customerName(w, o.customerId)));
 
-/** Line-level filters of the product and line item reports. */
-type LineQuery = {
-  categoryIds?: Id[]; subcategoryIds?: Id[]; tagIds?: Id[]; vendorIds?: Id[]; brandIds?: Id[]; groupIds?: Id[]; locationIds?: Id[];
-  search?: string; sample?: "ONLY" | "EXCLUDE"; tradeSamplePackages?: "ONLY" | "EXCLUDE";
-};
+/** search-sales-orders ranks by order number similarity; an order found by its customer's name ranks after those. */
+const orderCloseness = (w: World, term: string) => (o: SalesOrder) => tiers(closeness(term, [o.orderNumber]), matches(term, customerName(w, o.customerId)) ? 0 : undefined);
 
-function lineMatches(w: World, o: SalesOrder, line: Line, q: LineQuery): boolean {
+/** Line-level filters of the product and line item reports: the shared product filters, and the line's own. */
+type LineQuery = ProductFilters & { locationIds?: Id[]; search?: string; sample?: "ONLY" | "EXCLUDE"; tradeSamplePackages?: "ONLY" | "EXCLUDE" };
+
+function lineMatches(w: World, o: SalesOrder, line: Line, q: LineQuery, ofKind: (p: Product) => boolean): boolean {
   const p = productOf(w, line.productId);
-  return oneOf(q.categoryIds, p.categoryId) && oneOf(q.subcategoryIds, p.subcategoryId) && (!q.tagIds || p.tagIds.some((t) => q.tagIds!.includes(t)))
-    && oneOf(q.vendorIds, p.vendorId) && oneOf(q.brandIds, p.brandId) && oneOf(q.groupIds, p.groupId) && oneOf(q.locationIds, o.locationId)
+  return ofKind(p) && inList(q.locationIds, o.locationId)
     && matches(q.search, p.name, p.sku)
     // No line is a sample and no package is a trade sample; a line with no package is dropped by either trade sample value.
     && q.sample !== "ONLY" && (!q.tradeSamplePackages || (q.tradeSamplePackages === "EXCLUDE" && line.packageId !== null));
@@ -145,22 +131,15 @@ type InvoiceQuery = {
 
 function invoiceMatches(w: World, inv: Invoice, q: InvoiceQuery): boolean {
   const m = invoiceMoney(w, inv), o = orderOf(w, inv);
-  return oneOf(q.ids, inv.id) && oneOf(q.customerIds, inv.customerId) && oneOf(q.ownerIds, inv.ownerId)
-    && hasLine(o, q.productIds, (i) => i.productId) && hasLine(o, q.batchIds, (i) => i.batchId) && oneOf(q.licenseIds, licenseOf(w, o)?.id)
+  return inList(q.ids, inv.id) && inList(q.customerIds, inv.customerId) && inList(q.ownerIds, inv.ownerId)
+    && hasLine(o, q.productIds, (i) => i.productId) && hasLine(o, q.batchIds, (i) => i.batchId) && inList(q.licenseIds, licenseOf(w, o)?.id)
     && inSpan(w, inv.invoiceDatetime, q.invoiced) && inSpan(w, inv.dueDatetime, q.due) && between(m.paid, q.paid) && between(m.total, q.total)
-    && oneOf(q.payment, m.status) && oneOf(q.orderStatuses, o.status) && matches(q.search, inv.invoiceNumber)
+    && inList(q.payment, m.status) && inList(q.orderStatuses, o.status)
     && (q.voidStatus === "ANY" || (q.voidStatus === "VOIDED") === inv.voided);
 }
 
-/** Closest match first: the exact number, then numbers that contain the term (shortest first), then matches on other fields. */
-function ranked<T>(items: T[], term: string, numberOf: (x: T) => string): T[] {
-  const t = term.toLowerCase();
-  const score = (x: T) => {
-    const n = numberOf(x).toLowerCase();
-    return n === t ? 0 : n.includes(t) ? 1 + n.length - t.length : Number.MAX_SAFE_INTEGER;
-  };
-  return [...items].sort((a, b) => score(a) - score(b));
-}
+/** search on invoices matches the invoice number only, closest first. */
+const invoiceCloseness = (term: string) => (inv: Invoice) => closeness(term, [inv.invoiceNumber]);
 
 /** Refuses inputs that apply only to other values of rowsPer. */
 function onlyFor(args: object, rowsPer: string, inputs: string[], grains: string[]): void {
@@ -182,10 +161,10 @@ const packageRef = (w: World, id: Id | null) => {
 /** A sales order as search-sales-orders lists it; get-sales-order builds on it. */
 function orderRow(w: World, o: SalesOrder) {
   return {
-    id: o.id, customFields: [], orderNumber: o.orderNumber, status: STATUS_LABEL[o.status], recordOnly: false, color: null,
+    id: o.id, customFields: customFieldValues(w, "SALES_ORDER"), orderNumber: o.orderNumber, status: STATUS_LABEL[o.status], recordOnly: false, color: null,
     total: money(orderTotal(o)), totalCharges: money(0), totalReturned: money(0),
     orderDate: o.orderDatetime, dueDate: o.dueDatetime, deliveryDate: o.deliveryDatetime, createdDate: o.orderDatetime, updatedDate: orderUpdated(w, o),
-    url: `https://app.distru.com/sales-orders/${o.id.split("_")[1]}`,
+    url: recordUrl("salesOrder", o.id),
     customer: named(w.companies, o.customerId), owner: userRef(w, o.ownerId), location: named(w.locations, o.locationId),
     // The world does not match orders to Metrc transfers.
     complianceManifestNumber: null,
@@ -244,7 +223,7 @@ function orderDetail(w: World, o: SalesOrder, inc: OrderIncludes) {
 function invoiceRow(w: World, inv: Invoice) {
   const m = invoiceMoney(w, inv), o = orderOf(w, inv), updated = invoiceUpdated(w, inv);
   return {
-    id: inv.id, customFields: [], invoiceNumber: inv.invoiceNumber, paymentStatus: m.status, color: null,
+    id: inv.id, customFields: customFieldValues(w, "INVOICE"), invoiceNumber: inv.invoiceNumber, paymentStatus: m.status, color: null,
     total: money(m.total), paid: money(m.paid), creditsApplied: null, remainingAmount: money(m.remaining),
     qbInvoiceId: null, qbSyncStatus: null,
     // The world keeps no void time; the void is the invoice's last change.
@@ -273,39 +252,23 @@ function invoiceLink(w: World, inv: Invoice) {
   return { ...invoiceRef(w, inv), total: money(m.total), paid: money(m.paid), remainingAmount: money(m.remaining) };
 }
 
-/** Payments carry no number in the world; this one is derived from the id, so it is stable. */
-const paymentNumber = (p: InvoicePayment) => `PAY-${p.id.split("_")[1]}`;
-const paymentUpdated = (w: World, p: InvoicePayment) => lastChange(w, p.id, p.paymentDatetime);
-
 function paymentRow(w: World, p: InvoicePayment) {
-  const inv = w.invoices.find((i) => i.id === p.invoiceId)!, updated = paymentUpdated(w, p);
+  const inv = w.invoices.find((i) => i.id === p.invoiceId)!;
   return {
-    id: p.id, paymentNumber: paymentNumber(p), paymentDate: p.paymentDatetime, status: p.voided ? "VOIDED" : "POSTED", voidedAt: p.voided ? updated : null,
+    id: p.id, paymentNumber: p.paymentNumber, paymentDate: p.paymentDatetime, status: p.voidedAt ? "VOIDED" : "POSTED", voidedAt: p.voidedAt,
     received: { amount: money(p.amount), paymentMethod: named(w.paymentMethods, p.paymentMethodId) },
     // The world has no customer credits, and an invoice's paid amount counts every posted payment in full.
     creditAmount: money(0), appliedAmount: money(p.amount), overpaidAmount: money(0), note: p.note,
     customer: named(w.companies, inv.customerId), invoice: invoiceRef(w, inv),
-    qbDepositAccount: null, qbPaymentId: null, qbSyncStatus: null, insertedAt: p.paymentDatetime, updatedAt: updated,
+    qbDepositAccount: null, qbPaymentId: null, qbSyncStatus: null, insertedAt: p.recordedAt, updatedAt: paymentUpdatedAt(p),
   };
 }
 
 // ---------- report helpers ----------
 
-const MAX_REPORT_ROWS = 5000;
-
+/** A report page, with the columns given as `{ key: label }`. */
 function reportPage<R>(info: { report: string; dateRange: string; columns: Record<string, string> }, rows: R[], args: ReportPaging) {
-  if (args.maxRowsLimit !== undefined && args.maxRowsLimit > MAX_REPORT_ROWS) throw new ToolError(`maxRowsLimit must be at most ${MAX_REPORT_ROWS}.`);
-  const columns = Object.entries(info.columns).map(([key, label]) => ({ key, label }));
-  return report({ ...info, columns }, rows, args);
-}
-
-/** The default range of the reports: the 30 calendar days ending today. */
-const lastThirtyDays = (w: World): Span => ({ start: addDays(w.today, -29), end: w.today });
-
-/** `orderDatetime 2026-07-01 to 2026-09-30; ...`, naming each date filter the report applied. */
-function dateRange(ranges: [string, Span | undefined][]): string {
-  const set = ranges.filter((r): r is [string, Span] => r[1] !== undefined);
-  return set.map(([name, s]) => `${name} ${s.start ?? "any"} to ${s.end ?? "any"}`).join("; ") || "all dates";
+  return report({ ...info, columns: Object.entries(info.columns).map(([key, label]) => ({ key, label })) }, rows, args);
 }
 
 /** Report timestamps: `YYYY-MM-DD HH:MM:SS.ffffff`, no offset, in company time or in UTC. */
@@ -338,7 +301,7 @@ function invoiceReportRow(w: World, inv: Invoice) {
     salesOrder: o.orderNumber, salesOrderId: o.id, customer: customerName(w, inv.customerId) ?? "", customerId: inv.customerId,
     status: REPORT_PAYMENT[m.status], paid: money(m.paid), outstanding: money(inv.voided ? 0 : m.total - m.paid),
     lineItemSubtotal: money(m.total), totalTaxes: money(0), taxSummary: null, totalCharges: money(0), chargeSummary: null, totalDiscounts: money(0), discountSummary: null,
-    total: money(m.total), owner: userName(w, inv.ownerId), invoiceOwnerId: inv.ownerId, customFields: [],
+    total: money(m.total), owner: userName(w, inv.ownerId), invoiceOwnerId: inv.ownerId, customFields: reportCustomFields(w, "INVOICE"),
   };
 }
 
@@ -355,7 +318,7 @@ function orderReportRow(w: World, o: SalesOrder) {
     ...orderDates(w, o), orderNumber: o.orderNumber, salesOrderId: o.id, recordOnly: false, customer: customerName(w, o.customerId), customerId: o.customerId, status: o.status,
     paid: money(m.paid), outstanding: money(o.status === "CANCELED" ? 0 : m.total - m.paid),
     subtotal: money(m.total), taxes: money(0), discountsTaxesNotIncluded: money(0), chargesTaxesNotIncluded: money(0), returns: money(0), total: money(m.total),
-    owner: userName(w, o.ownerId), salesOrderOwnerId: o.ownerId, orderSource: orderSource(w, o), customFields: [],
+    owner: userName(w, o.ownerId), salesOrderOwnerId: o.ownerId, orderSource: orderSource(w, o), customFields: reportCustomFields(w, "SALES_ORDER"),
   };
 }
 
@@ -378,7 +341,9 @@ function lineReportRow(w: World, o: SalesOrder, i: Line) {
     priceTierMode: "AUTO", priceTier: null, returnedQuantity: qty(0), quantity: qty(i.quantity), category: f.category, subcategory: f.subcategory, group: f.group,
     customer: customerName(w, o.customerId), customerId: o.customerId, salesRep: userName(w, o.ownerId), salesOrderOwnerId: o.ownerId,
     invoiceNumbers: invoicesOf(w, o).map((inv) => inv.invoiceNumber).join(", ") || null, upc: null,
-    batchNumber: batchRef(w, i.batchId)?.name ?? null, batchId: i.batchId, packageId: i.packageId, sourcePackage: packageRef(w, i.packageId)?.metrcLabel ?? null, customFields: [],
+    batchNumber: batchRef(w, i.batchId)?.name ?? null, batchId: i.batchId, packageId: i.packageId, sourcePackage: packageRef(w, i.packageId)?.metrcLabel ?? null,
+    // For a Metrc company the documentation puts the line's package and potency here; no line in this world carries either.
+    customFields: [],
   };
 }
 
@@ -410,14 +375,15 @@ function customerTotals(w: World, orders: SalesOrder[]) {
         name: c.name, customerId: c.id, lastOrderDate: latest ? usDay(reportDay(w, latest)) : null, orderCount: String(own.length),
         totalReceived: money(sum(own, (o) => orderMoney(w, o).paid)), totalSales: money(sales),
         // Customers have no category in this world.
-        owner: userName(w, c.ownerId), customerOwnerId: c.ownerId, category: null, relationshipType: c.relationship, customFields: [],
+        owner: userName(w, c.ownerId), customerOwnerId: c.ownerId, category: null, relationshipType: c.relationship, customFields: reportCustomFields(w, "COMPANY"),
       };
     });
 }
 
 /** One row per product sold on a counted line, highest total sales first. */
 function productTotals(w: World, orders: SalesOrder[], lq: LineQuery) {
-  const lines = orders.flatMap((o) => o.items.filter((i) => lineMatches(w, o, i, lq)).map((i) => ({ o, i })));
+  const ofKind = productFilter(w, lq);
+  const lines = orders.flatMap((o) => o.items.filter((i) => lineMatches(w, o, i, lq, ofKind)).map((i) => ({ o, i })));
   const ids = [...new Set(lines.map((l) => l.i.productId))];
   return ids
     .map((id) => { const own = lines.filter((l) => l.i.productId === id); return { id, own, sales: sum(own, (l) => l.i.quantity * l.i.unitPrice) }; })
@@ -430,7 +396,7 @@ function productTotals(w: World, orders: SalesOrder[], lq: LineQuery) {
         category: f.category, subcategory: f.subcategory, group: f.group, vendor: f.vendor, vendorId: f.vendorId, productOwner: null,
         unitCost: money(p.unitCost), salePrice: money(p.unitPrice), wholesalePrice: null,
         // A product shipped from several licenses has no single one to name.
-        shippedFromLicense: licenses.length === 1 ? licenses[0]! : null, upc: null, customFields: [],
+        shippedFromLicense: licenses.length === 1 ? licenses[0]! : null, upc: null, customFields: reportCustomFields(w, "PRODUCT"),
       };
     });
 }
@@ -438,20 +404,22 @@ function productTotals(w: World, orders: SalesOrder[], lq: LineQuery) {
 /** Every rep, or the listed ones, ranked by total sales; reps without counted orders rank with 0s. */
 function repTotals(w: World, orders: SalesOrder[], ownerIds: Id[] | undefined) {
   return w.users
-    .filter((u) => oneOf(ownerIds, u.id))
+    .filter((u) => inList(ownerIds, u.id))
     .map((u) => { const own = orders.filter((o) => o.ownerId === u.id); return { u, own, sales: sum(own, orderTotal) }; })
     .sort((a, b) => b.sales - a.sales || userName(w, a.u.id)!.localeCompare(userName(w, b.u.id)!))
     .map(({ u, own, sales }, rank) => ({
       leaderboardRank: String(rank + 1), user: userName(w, u.id), userId: u.id, orderCount: String(own.length),
       // The world has no taxes, so sales before and after tax are the same.
-      salesPreTax: money(sales), totalSales: money(sales), customFields: [],
+      salesPreTax: money(sales), totalSales: money(sales),
+      // Users take no custom fields.
+      customFields: [],
     }));
 }
 
 // ---------- PDFs ----------
 
 /** The record a PDF is made from: `type` and `name` are how the activity log names it. */
-type PdfSource = { type: string; id: string; name: string; filename: string };
+type PdfSource = { type: RecordType; id: string; name: string; filename: string };
 
 const noLabResult = (what: string) => new ToolError(`No lab result file found for ${what}, so there is no COA to generate.`);
 
@@ -468,12 +436,12 @@ const PDF_SOURCES: Record<string, (w: World, id: string) => PdfSource> = {
   PURCHASE_ORDER: (w, id) => {
     const po = find(w.purchaseOrders, normalizeId(id, PREFIX.purchaseOrder), "purchase order");
     if (po.status === "DRAFT") throw new ToolError(`${po.purchaseNumber} is a draft: draft purchase orders have no PDF.`);
-    return { type: "PURCHASE_ORDER", id: po.id, name: po.purchaseNumber, filename: `Purchase order ${po.purchaseNumber}.pdf` };
+    return { type: "PURCHASE", id: po.id, name: po.purchaseNumber, filename: `Purchase order ${po.purchaseNumber}.pdf` };
   },
   METRC_MANIFEST: (w, id) => {
     const m = w.metrcManifests.find((x) => x.manifestNumber === id);
     if (!m) throw new ToolError(`No Metrc manifest found with number ${id}.`);
-    return { type: "METRC_MANIFEST", id: m.manifestNumber, name: m.manifestNumber, filename: `Manifest ${m.manifestNumber}.pdf` };
+    return { type: "COMPLIANCE_TRANSFER", id: m.manifestNumber, name: m.manifestNumber, filename: `Manifest ${m.manifestNumber}.pdf` };
   },
   INVOICE_COA: (w, id) => { throw noLabResult(`the line items of ${find(w.invoices, normalizeId(id, PREFIX.invoice), "invoice").invoiceNumber}`); },
   SALES_ORDER_COA: (w, id) => { throw noLabResult(`the line items of ${find(w.salesOrders, normalizeId(id, PREFIX.salesOrder), "sales order").orderNumber}`); },
@@ -486,6 +454,16 @@ const PDF_SOURCES: Record<string, (w: World, id: string) => PdfSource> = {
 const pdfSource = (w: World, document: string, id: string) => PDF_SOURCES[document]!(w, id);
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * What emailing a document logs on it. An invoice keeps the addresses it was sent to (INVOICE_RECIPIENT_EMAIL lines);
+ * other documents keep nothing, so the action shows on the record with no field changed.
+ */
+function emailRows(source: PdfSource, addresses: string[]): ActionRow[] {
+  const head = { type: source.type, id: source.id, name: source.name };
+  if (source.type !== "INVOICE") return [{ ...head, entity: source.type, rowId: source.type === "COMPLIANCE_TRANSFER" ? null : source.id, op: "UPDATE", rowLabel: null, fields: [] }];
+  return addresses.map((email) => ({ ...head, entity: "INVOICE_RECIPIENT_EMAIL", rowId: null, op: "INSERT", rowLabel: email, fields: [{ field: "email", label: "Email", oldValue: null, newValue: email }] }));
+}
 
 // ---------- tools ----------
 
@@ -548,7 +526,7 @@ export const tools = [
         statuses: args.status, payment: args.paymentStatus, recordOnly: args.recordOnly, search: orderSearch(w, args.search),
       }));
       const order = args.search
-        ? ranked(found, args.search, (o) => o.orderNumber)
+        ? ranked(found, orderCloseness(w, args.search))
         : sorted(found, args.sortBy, {
           DUE_DATE: (o) => time(o.dueDatetime), INSERTED_AT: (o) => time(o.orderDatetime), ORDER_DATE: (o) => time(o.orderDatetime),
           ORDER_NUMBER: (o) => o.orderNumber, TOTAL: orderTotal, UPDATED_AT: (o) => time(orderUpdated(w, o)),
@@ -580,10 +558,10 @@ export const tools = [
         ids, customerIds: normalizeIds(args.customerIds, PREFIX.company), ownerIds: normalizeIds(args.ownerIds, PREFIX.user), productIds: normalizeIds(args.productIds, PREFIX.product),
         invoiced: { start: args.invoiceDateAfter, end: args.invoiceDateBefore }, due: { start: args.dueDateAfter, end: args.dueDateBefore },
         paid: { min: args.paidGreaterThanOrEqualTo, max: args.paidLessThanOrEqualTo }, total: { min: args.totalGreaterThanOrEqualTo, max: args.totalLessThanOrEqualTo },
-        payment: args.paymentStatus, orderStatuses: args.salesOrderStatus, search: args.search, voidStatus: args.voidStatus ?? (ids ? "ANY" : "NOT_VOIDED"),
+        payment: args.paymentStatus, orderStatuses: args.salesOrderStatus, voidStatus: args.voidStatus ?? (ids ? "ANY" : "NOT_VOIDED"),
       }));
       const order = args.search
-        ? ranked(found, args.search, (inv) => inv.invoiceNumber)
+        ? ranked(found, invoiceCloseness(args.search))
         : sorted(found, args.sortBy, {
           DUE_DATE: (inv) => time(inv.dueDatetime), INSERTED_AT: (inv) => time(inv.invoiceDatetime), INVOICE_DATE: (inv) => time(inv.invoiceDatetime),
           INVOICE_NUMBER: (inv) => inv.invoiceNumber, REMAINING_AMOUNT: (inv) => invoiceMoney(w, inv).remaining, TOTAL: (inv) => invoiceMoney(w, inv).total,
@@ -614,16 +592,21 @@ export const tools = [
       const methodIds = normalizeIds(args.paymentMethodIds, PREFIX.paymentMethod);
       const applied = { min: amount(args.appliedAmountMin, "appliedAmountMin"), max: amount(args.appliedAmountMax, "appliedAmountMax") };
       const status = args.status ?? "POSTED";
-      const like = args.search === undefined ? undefined : wildcard(args.search);
+      // search: a wildcard substring of the number, note or invoice number, or of the customer's name, which also matches within a typo.
+      const searched = (p: InvoicePayment, inv: Invoice) => {
+        const customer = customerName(w, inv.customerId);
+        return like(args.search!, p.paymentNumber, p.note, inv.invoiceNumber, customer) || closeness(args.search!, [], [customer]) !== undefined;
+      };
       const found = w.invoicePayments.filter((p) => {
         const inv = w.invoices.find((i) => i.id === p.invoiceId)!;
-        return oneOf(invoiceIds, p.invoiceId) && oneOf(customerIds, inv.customerId) && oneOf(methodIds, p.paymentMethodId)
+        return inList(invoiceIds, p.invoiceId) && inList(customerIds, inv.customerId) && inList(methodIds, p.paymentMethodId)
           && inSpan(w, p.paymentDatetime, { start: args.paymentDateAfter, end: args.paymentDateBefore }) && between(p.amount, applied)
-          && matches(args.paymentNumber, paymentNumber(p)) && (status === "ALL" || (status === "VOIDED") === p.voided)
-          && (!like || [paymentNumber(p), p.note, inv.invoiceNumber, customerName(w, inv.customerId)].some((f) => f !== null && like.test(f)));
+          && matches(args.paymentNumber, p.paymentNumber) && (status === "ALL" || (status === "VOIDED") === (p.voidedAt !== null))
+          && (args.search === undefined || searched(p, inv));
       });
+      // search keeps the sortBy order.
       const order = sorted(found, args.sortBy, {
-        INSERTED_AT: (p) => time(p.paymentDatetime), PAYMENT_DATE: (p) => time(p.paymentDatetime), PAYMENT_NUMBER: paymentNumber, UPDATED_AT: (p) => time(paymentUpdated(w, p)),
+        INSERTED_AT: (p) => time(p.recordedAt), PAYMENT_DATE: (p) => time(p.paymentDatetime), PAYMENT_NUMBER: (p) => p.paymentNumber, UPDATED_AT: (p) => time(paymentUpdatedAt(p)),
       }, { field: "PAYMENT_DATE", direction: "DESC" });
       return page(order, args, (p) => paymentRow(w, p));
     },
@@ -648,17 +631,17 @@ export const tools = [
       "shippedFromLicenseIds", "statuses", "total", "voidStatus", "maxRowsLimit",
     ],
     run(args: InvoiceReportArgs, { world: w }) {
-      const invoiced = args.invoiceDatetime ?? (args.dueDatetime ? undefined : lastThirtyDays(w));
-      const found = w.invoices.filter((inv) => invoiceMatches(w, inv, {
+      const invoiced = args.invoiceDatetime ?? (args.dueDatetime ? undefined : lastDays(w.today));
+      const found = w.invoices.filter((inv) => matches(args.search, inv.invoiceNumber) && invoiceMatches(w, inv, {
         customerIds: normalizeIds(args.customerIds, PREFIX.company), productIds: normalizeIds(args.productIds, PREFIX.product),
         batchIds: normalizeIds(args.batchIds, PREFIX.batch), licenseIds: normalizeIds(args.shippedFromLicenseIds, PREFIX.license),
-        invoiced, due: args.dueDatetime, paid: args.paid, total: args.total, orderStatuses: args.orderStatuses, search: args.search,
+        invoiced, due: args.dueDatetime, paid: args.paid, total: args.total, orderStatuses: args.orderStatuses,
         payment: args.statuses?.map((s) => (s === "FULLY_PAID" ? "PAID" : s) as PaymentStatus), voidStatus: args.voidStatus ?? "NOT_VOIDED",
       }));
       const order = args.search
-        ? ranked(found, args.search, (inv) => inv.invoiceNumber)
+        ? ranked(found, invoiceCloseness(args.search))
         : [...found].sort((a, b) => b.invoiceNumber.localeCompare(a.invoiceNumber, undefined, { numeric: true }));
-      const info = { report: "Invoice history", dateRange: dateRange([["invoiceDatetime", invoiced], ["dueDatetime", args.dueDatetime]]), columns: INVOICE_COLUMNS };
+      const info = { report: "Invoice history", dateRange: describeRanges([["invoiceDatetime", invoiced], ["dueDatetime", args.dueDatetime]]), columns: INVOICE_COLUMNS };
       return reportPage(info, order.map((inv) => invoiceReportRow(w, inv)), args);
     },
   }),
@@ -673,7 +656,7 @@ export const tools = [
       onlyFor(args, args.rowsPer, ["customerGroupIds"], ["CUSTOMER"]);
       onlyFor(args, args.rowsPer, ["search"], ["PRODUCT", "SALES_REP"]);
       onlyFor(args, args.rowsPer, PRODUCT_ONLY, ["PRODUCT"]);
-      const ordered = args.orderDatetime ?? lastThirtyDays(w);
+      const ordered = args.orderDatetime ?? lastDays(w.today);
       const ownerIds = normalizeIds(args.ownerIds, PREFIX.user);
       const orders = w.salesOrders.filter((o) => orderMatches(w, o, {
         ordered, statuses: args.statuses ?? NOT_CANCELED, ownerIds,
@@ -684,11 +667,10 @@ export const tools = [
       const rows: object[] = args.rowsPer === "CUSTOMER" ? customerTotals(w, orders)
         : args.rowsPer === "SALES_REP" ? repTotals(w, orders, ownerIds)
         : productTotals(w, orders, {
-          categoryIds: normalizeIds(args.productCategoryIds, PREFIX.category), subcategoryIds: normalizeIds(args.productSubcategoryIds, PREFIX.subcategory),
-          tagIds: normalizeIds(args.productTagIds, PREFIX.tag), vendorIds: normalizeIds(args.vendorIds, PREFIX.company), brandIds: normalizeIds(args.brandIds, PREFIX.company),
-          groupIds: normalizeIds(args.productGroupIds, PREFIX.group), locationIds: normalizeIds(args.locationIds, PREFIX.location), search: args.search,
+          productCategoryIds: args.productCategoryIds, productSubcategoryIds: args.productSubcategoryIds, productTagIds: args.productTagIds, vendorIds: args.vendorIds,
+          brandIds: args.brandIds, productGroupIds: args.productGroupIds, locationIds: normalizeIds(args.locationIds, PREFIX.location), search: args.search,
         });
-      const info = { report: `Sales totals per ${args.rowsPer.toLowerCase().replace("_", " ")}`, dateRange: dateRange([["orderDatetime", ordered]]), columns: TOTALS_COLUMNS[args.rowsPer]! };
+      const info = { report: `Sales totals per ${args.rowsPer.toLowerCase().replace("_", " ")}`, dateRange: describeRanges([["orderDatetime", ordered]]), columns: TOTALS_COLUMNS[args.rowsPer]! };
       return reportPage(info, rows, args);
     },
   }),
@@ -702,7 +684,7 @@ export const tools = [
     ],
     run(args: SalesOrdersReportArgs, { world: w }) {
       onlyFor(args, args.rowsPer, LINE_ONLY, ["LINE_ITEM"]);
-      const ordered = args.orderDatetime ?? (args.deliveryDatetime || args.dueDatetime ? undefined : lastThirtyDays(w));
+      const ordered = args.orderDatetime ?? (args.deliveryDatetime || args.dueDatetime ? undefined : lastDays(w.today));
       const brandIds = normalizeIds(args.brandIds, PREFIX.company);
       const orders = w.salesOrders.filter((o) => orderMatches(w, o, {
         ordered, delivered: args.deliveryDatetime, due: args.dueDatetime, statuses: args.statuses ?? NOT_CANCELED, payment: args.paymentStatuses,
@@ -714,16 +696,16 @@ export const tools = [
         total: args.total, matchedWithComplianceTransfer: args.matchedWithComplianceTransfer, sources: args.orderSources, search: orderSearch(w, args.search, 2),
       })).sort((a, b) => time(b.orderDatetime) - time(a.orderDatetime));
       const lq: LineQuery = {
-        brandIds, groupIds: normalizeIds(args.productGroupIds, PREFIX.group), categoryIds: normalizeIds(args.productCategoryIds, PREFIX.category),
-        subcategoryIds: normalizeIds(args.productSubcategoryIds, PREFIX.subcategory), tagIds: normalizeIds(args.productTagIds, PREFIX.tag),
-        vendorIds: normalizeIds(args.vendorIds, PREFIX.company), sample: args.sample, tradeSamplePackages: args.tradeSamplePackages,
+        brandIds: args.brandIds, productGroupIds: args.productGroupIds, productCategoryIds: args.productCategoryIds, productSubcategoryIds: args.productSubcategoryIds,
+        productTagIds: args.productTagIds, vendorIds: args.vendorIds, sample: args.sample, tradeSamplePackages: args.tradeSamplePackages,
       };
-      const dates = dateRange([["orderDatetime", ordered], ["deliveryDatetime", args.deliveryDatetime], ["dueDatetime", args.dueDatetime]]);
+      const ofKind = productFilter(w, lq);
+      const dates = describeRanges([["orderDatetime", ordered], ["deliveryDatetime", args.deliveryDatetime], ["dueDatetime", args.dueDatetime]]);
       switch (args.rowsPer) {
         case "ORDER":
           return reportPage({ report: "Sales orders", dateRange: dates, columns: ORDER_COLUMNS }, orders.map((o) => orderReportRow(w, o)), args);
         case "LINE_ITEM": {
-          const rows = orders.flatMap((o) => o.items.filter((i) => lineMatches(w, o, i, lq)).map((i) => lineReportRow(w, o, i)));
+          const rows = orders.flatMap((o) => o.items.filter((i) => lineMatches(w, o, i, lq, ofKind)).map((i) => lineReportRow(w, o, i)));
           return reportPage({ report: "Sales order line items", dateRange: dates, columns: LINE_COLUMNS }, rows, args);
         }
         case "TAX_RATE":
@@ -759,10 +741,7 @@ export const tools = [
       const bad = args.emailAddresses.filter((a) => !EMAIL.test(a));
       if (bad.length) throw new ToolError(`Not an email address: ${bad.join(", ")}.`);
       c.world.outbox.push({ document: args.document, recordId: source.id, emailAddresses: args.emailAddresses, sentAt: stamp(c) });
-      recordAction(c, [{
-        type: source.type, id: source.id, name: source.name, op: "UPDATE", rowLabel: null,
-        fields: [{ field: "emailedTo", label: "Emailed to", oldValue: null, newValue: args.emailAddresses.join(", ") }],
-      }]);
+      recordAction(c, emailRows(source, args.emailAddresses));
       return { emailedTo: args.emailAddresses };
     },
   }),

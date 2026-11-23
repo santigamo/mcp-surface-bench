@@ -1,19 +1,16 @@
 // Record history and the company activity feed, both read from `world.actions`: what users and systems did,
 // and what the MCP write tools did through `recordAction`.
-import { addDays, bound, dayIn, normalizeId, normalizeIds, page, sorted, within, zoned, type SortBy } from "../../../src/core/kit.ts";
+import { addDays, bound, dayIn, inList, normalizeId, normalizeIds, page, sorted, within, zoned, type SortBy } from "../../../src/core/kit.ts";
 import { ToolError, defineTool } from "../../../src/core/tool.ts";
-import { PREFIX, fullName, type Action, type Id, type World } from "../world.ts";
+import { PREFIX, fullName, type Action, type ActionRow as Row, type Id, type World } from "../world.ts";
 
 type Paging = { limit?: number; cursor?: string };
-type Row = Action["records"][number];
 
 /** The first rows of an action that an entry reads; the rest are counted and marked truncated. */
 const ROW_CAP = 50;
 const DAY = 86_400_000;
 /** A calendar day lasts 25 hours when the clocks go back, so a span of whole days can run an hour long. */
 const CLOCK_CHANGE = 3_600_000;
-
-const inList = (list: readonly string[] | undefined, value: string | null) => !list || (value !== null && list.includes(value));
 
 // ---------- record types ----------
 
@@ -47,14 +44,8 @@ const KINDS: Record<string, Kind> = {
   USER: kind(PREFIX.user, (w) => w.users, (u) => fullName(u)),
 };
 
-/** World names of record types that the documentation names otherwise. */
-const DOCUMENTED_TYPE: Record<string, string> = { PURCHASE_ORDER: "PURCHASE", METRC_MANIFEST: "COMPLIANCE_TRANSFER" };
-/** An action's rows, with record types as the documentation names them. */
-const rowsOf = (a: Action): Row[] => a.records.map((r) => ({ ...r, type: DOCUMENTED_TYPE[r.type] ?? r.type }));
-
-/** The documented entity of a line of a record (a row with a `rowLabel`), by the record's type. */
-const LINE_ENTITY: Record<string, string> = { SALES_ORDER: "ORDER_ITEM", INVOICE: "INVOICE_ITEM", STOCK_TRANSFER: "STOCK_TRANSFER_ITEM", MENU: "MENU_PRODUCT" };
-const entityOf = (r: Row) => (r.rowLabel === null ? r.type : LINE_ENTITY[r.type] ?? r.type);
+/** Whether a row is the record's own, rather than one of its lines. */
+const own = (r: Row) => r.entity === r.type;
 
 /** `SALES_ORDER` -> `sales order`. */
 const words = (type: string) => type.toLowerCase().replaceAll("_", " ");
@@ -74,20 +65,17 @@ const byChangedAt = (actions: Action[], sortBy: SortBy | undefined) =>
 
 // ---------- get-record-history ----------
 
-/** A row as the record's History tab shows it. The world keeps no id for a line, so a line's row has no rowId. */
-const historyRow = (r: Row) => {
-  const entity = entityOf(r);
-  return { entity, entityLabel: sentence(entity), op: r.op, ...(r.rowLabel === null ? { rowId: r.id } : {}), rowLabel: r.rowLabel, fields: r.fields };
-};
+/** A row as the record's History tab shows it, with its id when the world keeps one for it. */
+const historyRow = (r: Row) => ({ entity: r.entity, entityLabel: sentence(r.entity), op: r.op, ...(r.rowId !== null ? { rowId: r.rowId } : {}), rowLabel: r.rowLabel, fields: r.fields });
 
 /** The record's own row first, then its lines, as the documentation orders them. */
-const ownRowFirst = (a: Row, b: Row) => Number(a.rowLabel !== null) - Number(b.rowLabel !== null);
+const ownRowFirst = (a: Row, b: Row) => Number(!own(a)) - Number(!own(b));
 
 function recordHistory(w: World, recordType: string, recordId: string) {
   const k = KINDS[recordType];
   // A type the world holds no records of is found only through the actions that name it, by the id they give.
   const id = k ? normalizeId(recordId, k.prefix) : recordId;
-  const rowsIn = (a: Action) => rowsOf(a).filter((r) => r.type === recordType && r.id === id).sort(ownRowFirst);
+  const rowsIn = (a: Action) => a.records.filter((r) => r.type === recordType && r.id === id).sort(ownRowFirst);
   const actions = w.actions.filter((a) => rowsIn(a).length);
   // A deleted record keeps its history.
   if (!actions.length && k?.nameOf(w, id) === undefined) throw new ToolError(`No ${words(recordType)} found with id ${id}.`);
@@ -104,9 +92,9 @@ function byRecord(rows: Row[]): Row[][] {
 }
 
 /** INSERT or DELETE when the action wrote the record's own row that way; a change to its lines alone is an UPDATE. */
-const recordOp = (rows: Row[]) => rows.find((r) => r.rowLabel === null)?.op ?? "UPDATE";
+const recordOp = (rows: Row[]) => rows.find(own)?.op ?? "UPDATE";
 
-const changedFields = (rows: Row[]) => [...new Set(rows.flatMap((r) => r.fields.map((f) => (r.rowLabel === null ? f.field : `${camel(entityOf(r))}.${f.field}`))))];
+const changedFields = (rows: Row[]) => [...new Set(rows.flatMap((r) => r.fields.map((f) => (own(r) ? f.field : `${camel(r.entity)}.${f.field}`))))];
 
 /** A record of an entry, by its current name. A record that is gone keeps the name it last had and shows no type. */
 function activityRecord(w: World, rows: Row[], read: Set<Row>) {
@@ -159,7 +147,7 @@ function searchActivity(args: ActivitySearch, w: World, now: Date) {
   const [after, before] = changedRange(args.changedAt, ids !== undefined, w, now);
   const actions = w.actions.filter((a) => inList(ids, a.id) && inList(userIds, a.actorId) && inList(args.sources, a.source) && within(a.changedAt, after, before));
   return byChangedAt(actions, args.sortBy)
-    .map((a) => ({ a, rows: rowsOf(a).filter((r) => inList(args.recordTypes, r.type)) }))
+    .map((a) => ({ a, rows: a.records.filter((r) => inList(args.recordTypes, r.type)) }))
     .filter(({ rows }) => rows.length && (!args.ops || byRecord(rows).some((g) => args.ops!.includes(recordOp(g)))));
 }
 

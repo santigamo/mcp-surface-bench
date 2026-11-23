@@ -1,8 +1,8 @@
 // Metrc compliance: the company's licenses, and the packages, rooms, manifests and sync queue Distru keeps from Metrc.
-import { addDays, bound, matches, normalizeId, normalizeIds, page, qty, sorted, within, type SortBy } from "../../../src/core/kit.ts";
+import { bound, inList, inStatus, matches, normalizeId, normalizeIds, page, qty, sorted, within, type SortBy, type Status } from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
 import { PREFIX, type Id, type License, type MetrcActivity, type MetrcManifest, type MetrcPackage, type World } from "../world.ts";
-import { find, stamp, userRef, type C } from "./shared.ts";
+import { find, serial, stamp, userRef, type C } from "./shared.ts";
 
 const licenseRef = (w: World, id: Id) => {
   const l = w.licenses.find((x) => x.id === id)!;
@@ -10,9 +10,6 @@ const licenseRef = (w: World, id: Id) => {
 };
 
 const byTime = (iso: string) => Date.parse(iso);
-
-/** An activity type as the documentation names it: the world's MOVE_PACKAGE is Metrc's CHANGE_PACKAGE_LOCATION. */
-const activityType = (a: MetrcActivity) => (a.type === "MOVE_PACKAGE" ? "CHANGE_PACKAGE_LOCATION" : a.type);
 
 // ---------- licenses ----------
 
@@ -41,7 +38,7 @@ function pushStatus(w: World, l: License) {
     oldestIncompleteActivity: oldest
       ? {
           title: oldest.title,
-          type: activityType(oldest),
+          type: oldest.type,
           status: oldest.status === "FAILED" ? "FAILED" : "PENDING",
           queuedDatetime: oldest.insertedAt,
           lastAttemptDatetime: oldest.insertedAt,
@@ -54,9 +51,6 @@ function pushStatus(w: World, l: License) {
   };
 }
 
-// The world has no license dates; a year out keeps every license current.
-const expiryDate = (w: World) => addDays(w.today, 365);
-
 const licenseRow = (c: C, l: License) => ({
   id: l.id,
   licenseNumber: l.licenseNumber,
@@ -65,7 +59,7 @@ const licenseRow = (c: C, l: License) => ({
   active: l.active,
   hasCultivation: l.kind === "CULTIVATION",
   issueDate: null,
-  expiryDate: expiryDate(c.world),
+  expiryDate: l.expiryDate,
   metrcPullStatus: pullStatus(c, l),
   metrcPushStatus: pushStatus(c.world, l),
 });
@@ -211,7 +205,7 @@ function activityRow(w: World, a: MetrcActivity) {
   const k = a.packageId ? w.packages.find((x) => x.id === a.packageId) : undefined;
   return {
     id: a.id,
-    type: activityType(a),
+    type: a.type,
     title: a.title,
     description: a.description,
     status: a.status,
@@ -340,15 +334,12 @@ export const tools = [
   defineTool<World>({
     name: "search-licenses",
     supports: ["limit", "cursor", "complianceType", "ids", "sortBy", "status"],
-    run(args: { limit?: number; cursor?: string; complianceType?: string; ids?: string[]; sortBy?: SortBy; status?: "ACTIVE" | "ANY" | "INACTIVE" }, c) {
+    run(args: { limit?: number; cursor?: string; complianceType?: string; ids?: string[]; sortBy?: SortBy; status?: Status }, c) {
       const ids = normalizeIds(args.ids, PREFIX.license);
-      const status = args.status ?? "ACTIVE";
-      const licenses = c.world.licenses.filter(
-        (l) => (!ids || ids.includes(l.id)) && (!args.complianceType || l.complianceType === args.complianceType) && (status === "ANY" || (status === "ACTIVE") === l.active),
-      );
+      const licenses = c.world.licenses.filter((l) => inList(ids, l.id) && (!args.complianceType || l.complianceType === args.complianceType) && inStatus(args.status, l.active));
       // Licenses carry no timestamps here; their ids are in the order they were added, and none has changed since.
-      const order = (l: License) => +l.id.split("_")[1]!;
-      const ordered = sorted(licenses, args.sortBy, { EXPIRY_DATE: () => expiryDate(c.world), INSERTED_AT: order, LICENSE_NUMBER: (l) => l.licenseNumber, UPDATED_AT: order }, { field: "UPDATED_AT", direction: "DESC" });
+      const order = (l: License) => serial(l.id);
+      const ordered = sorted(licenses, args.sortBy, { EXPIRY_DATE: (l) => l.expiryDate, INSERTED_AT: order, LICENSE_NUMBER: (l) => l.licenseNumber, UPDATED_AT: order }, { field: "UPDATED_AT", direction: "DESC" });
       return page(ordered, args, (l) => licenseRow(c, l));
     },
   }),
@@ -388,15 +379,8 @@ export const tools = [
       const creatorIds = normalizeIds(args.creatorIds, PREFIX.user);
       const licenseIds = normalizeIds(args.licenseIds, PREFIX.license);
       const packageIds = normalizeIds(args.packageIds, PREFIX.package);
-      const found = w.metrcActivities.filter(
-        (a) =>
-          within(a.insertedAt, after, before) &&
-          (!ids || ids.includes(a.id)) &&
-          (!creatorIds || creatorIds.includes(a.creatorId)) &&
-          (!licenseIds || licenseIds.includes(a.licenseId)) &&
-          (!packageIds || (a.packageId !== null && packageIds.includes(a.packageId))) &&
-          (!args.statuses || args.statuses.includes(a.status)),
-      );
+      const found = w.metrcActivities.filter((a) => within(a.insertedAt, after, before) && inList(ids, a.id) && inList(creatorIds, a.creatorId) && inList(licenseIds, a.licenseId)
+        && inList(packageIds, a.packageId) && inList(args.statuses, a.status));
       const ordered = sorted(found, args.sortBy, { INSERTED_AT: (a) => byTime(a.insertedAt) }, { field: "INSERTED_AT", direction: "DESC" });
       return page(ordered, args, (a) => activityRow(w, a));
     },

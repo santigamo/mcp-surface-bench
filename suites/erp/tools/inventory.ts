@@ -1,54 +1,22 @@
 // Where stock is held and how it moves: locations, batches, packages, stock transfers, and the stock-per-asset report.
-import { bound, instant, isoIn, matches, money, normalizeId, normalizeIds, page, qty, report, sorted, within, type SortBy } from "../../../src/core/kit.ts";
+import { bound, closeness, inList, inStatus, instant, isoIn, money, normalizeId, normalizeIds, page, qty, ranked, report, sorted, tiers, within, type SortBy, type Status } from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
-import { newId, PREFIX, type Batch, type Id, type Location, type Package, type Product, type StockTransfer, type World } from "../world.ts";
-import { find, named, recordAction, stamp, type C } from "./shared.ts";
+import { batchStock, newId, PREFIX, type Batch, type Id, type Location, type Package, type Product, type StockTransfer, type World } from "../world.ts";
+import {
+  categoryOf, companyName, customFieldValues, find, named, PRODUCT_FILTERS, productFilter, productOf, recordAction, recordUrl, reportCustomFields, serial, stamp,
+  subcategoryName, unitTypeOf, type C, type ProductFilters,
+} from "./shared.ts";
 
 type StockRow = { locationId: Id; quantity: number };
-
-// ---------- products: the lookups and filters the inventory and costing tools share ----------
-
-export const productOf = (w: World, id: Id) => w.products.find((p) => p.id === id)!;
-export const categoryOf = (w: World, p: Product) => w.categories.find((c) => c.id === p.categoryId)!.name;
-export const subcategoryOf = (w: World, p: Product) => w.categories.flatMap((c) => c.subcategories).find((s) => s.id === p.subcategoryId)?.name ?? null;
-export const unitTypeOf = (w: World, p: Product) => named(w.unitTypes, p.unitTypeId)!;
-export const companyName = (w: World, id: Id | null) => named(w.companies, id)?.name ?? null;
-
-/** No list means no filter; a list matches a value in it, never a missing one. */
-export const inList = (list: Id[] | undefined, value: Id | null) => !list || (value !== null && list.includes(value));
-
-export type ProductFilters = { productCategoryIds?: string[]; productSubcategoryIds?: string[]; productTagIds?: string[]; vendorIds?: string[]; brandIds?: string[]; productGroupIds?: string[] };
-export const PRODUCT_FILTERS = ["productCategoryIds", "productSubcategoryIds", "productTagIds", "vendorIds", "brandIds", "productGroupIds"] as const;
-
-/** The product filters every inventory and costing tool documents in the same words. */
-export function productFilter(w: World, f: ProductFilters): (p: Product) => boolean {
-  const categories = normalizeIds(f.productCategoryIds, PREFIX.category);
-  const subcategories = normalizeIds(f.productSubcategoryIds, PREFIX.subcategory);
-  const tags = normalizeIds(f.productTagIds, PREFIX.tag);
-  const vendors = normalizeIds(f.vendorIds, PREFIX.company);
-  const brands = normalizeIds(f.brandIds, PREFIX.company);
-  const groups = normalizeIds(f.productGroupIds, PREFIX.group);
-  // Categories and subcategories are ORed, except that a listed subcategory narrows its own category when both are listed.
-  const narrowed = new Set(w.categories.filter((c) => c.subcategories.some((s) => subcategories?.includes(s.id))).map((c) => c.id));
-  const ofKind = (p: Product) => {
-    if (!categories && !subcategories) return true;
-    if (p.subcategoryId !== null && subcategories?.includes(p.subcategoryId)) return true;
-    return !!categories?.includes(p.categoryId) && !narrowed.has(p.categoryId);
-  };
-  return (p) => ofKind(p) && (!tags || p.tagIds.some((t) => tags.includes(t))) && inList(vendors, p.vendorId) && inList(brands, p.brandId) && inList(groups, p.groupId);
-}
 
 // ---------- shared pieces of the records ----------
 
 const sum = (rows: StockRow[]) => rows.reduce((n, r) => n + r.quantity, 0);
 const at = (rows: StockRow[], locationId: Id) => rows.find((r) => r.locationId === locationId)?.quantity ?? 0;
 const time = (iso: string) => Date.parse(iso);
-const serial = (id: Id) => +id.split("_")[1]!;
 const location = (w: World, id: Id) => named(w.locations, id)!;
 const licenseOf = (w: World, l: Location) => w.licenses.find((x) => x.id === l.licenseId)!;
 const quantitiesByLocation = (w: World, rows: StockRow[]) => rows.map((r) => ({ location: location(w, r.locationId), quantity: qty(r.quantity) }));
-// The world stores no values for custom fields, so every record shows an empty list.
-const noCustomFields: never[] = [];
 
 // ---------- locations ----------
 
@@ -67,9 +35,9 @@ function locationRow(w: World, l: Location) {
 const batchRef = (b: Batch) => ({ id: b.id, name: b.batchNumber });
 
 function batchHeader(w: World, b: Batch) {
-  const quantity = sum(b.stock);
+  const quantity = sum(batchStock(w, b));
   return {
-    ...batchRef(b), customFields: noCustomFields, batchNumber: b.batchNumber, manufacturedDate: b.createdAt.slice(0, 10), harvestDate: null, expirationDate: null,
+    ...batchRef(b), customFields: customFieldValues(w, "BATCH"), batchNumber: b.batchNumber, manufacturedDate: b.createdAt.slice(0, 10), harvestDate: null, expirationDate: null,
     quantity: qty(quantity), activeQuantityCost: money(quantity * productOf(w, b.productId).unitCost),
   };
 }
@@ -79,7 +47,7 @@ function batchRow(w: World, b: Batch) {
   return {
     ...batchHeader(w, b),
     product: { id: p.id, name: p.name, sku: p.sku, inactive: !p.active, unitType: unitTypeOf(w, p) },
-    activeQuantitiesByLocation: quantitiesByLocation(w, b.stock),
+    activeQuantitiesByLocation: quantitiesByLocation(w, batchStock(w, b)),
     // The world records a THC figure on each batch but no lab test result to carry it.
     primaryTestResult: null,
   };
@@ -88,18 +56,18 @@ function batchRow(w: World, b: Batch) {
 // ---------- packages ----------
 
 const LAB_STATE = { TestPassed: "PASSED", NotSubmitted: "NOT_TESTED" } as const;
-const SYNC_REASON: Record<World["metrcActivities"][0]["type"], string> = { ADJUST_PACKAGE: "STOCK_ADJUSTMENT", FINISH_PACKAGE: "FINISH_PACKAGE", MOVE_PACKAGE: "UNKNOWN", CREATE_PACKAGE: "UNKNOWN" };
+const SYNC_REASON: Record<World["metrcActivities"][0]["type"], string> = { ADJUST_PACKAGE: "STOCK_ADJUSTMENT", FINISH_PACKAGE: "FINISH_PACKAGE", CHANGE_PACKAGE_LOCATION: "UNKNOWN", CREATE_PACKAGE: "UNKNOWN" };
 
 const metrcRecord = (w: World, k: Package) => w.metrcPackages.find((m) => m.label === k.metrcLabel);
-/** The change still being sent to Metrc for a package, if any. */
-const pendingSync = (w: World, k: Package) => w.metrcActivities.find((a) => a.packageId === k.id && a.status === "QUEUED");
+/** The oldest change of a package not yet in Metrc, if any: one that failed is still not sent, and holds back those queued after it. */
+const pendingSync = (w: World, k: Package) => w.metrcActivities.find((a) => a.packageId === k.id && a.status !== "COMPLETED");
 const activeSalesOrder = (w: World, k: Package) => w.salesOrders.find((o) => o.status !== "CANCELED" && o.items.some((i) => i.packageId === k.id));
 
 function packageRow(w: World, k: Package) {
   const p = productOf(w, k.productId), m = metrcRecord(w, k), l = w.locations.find((x) => x.id === k.locationId)!, license = w.licenses.find((x) => x.id === k.licenseId)!;
   const order = activeSalesOrder(w, k);
   return {
-    id: k.id, customFields: noCustomFields, metrcLabel: k.metrcLabel, complianceType: license.complianceType,
+    id: k.id, customFields: customFieldValues(w, "PACKAGE"), metrcLabel: k.metrcLabel, complianceType: license.complianceType,
     metrcId: m?.metrcId ?? null, complianceProductName: m?.itemName ?? null, complianceStrainName: m?.strainName ?? null,
     distruStatus: k.status,
     // No package is hidden in Distru in this world.
@@ -111,8 +79,7 @@ function packageRow(w: World, k: Package) {
     quantity: qty(k.quantity), quantityActive: qty(k.status === "ACTIVE" ? k.quantity : 0), quantityAssembling: "0",
     quantityInMetrc: m ? qty(m.quantity) : null, quantityCost: k.quantity ? money(k.quantity * p.unitCost) : null,
     unitType: unitTypeOf(w, p), product: { id: p.id, name: p.name, sku: p.sku },
-    // Packages of package-tracked products belong to no batch in this world; the page still requires one.
-    batch: { id: "", name: "" },
+    batch: batchRef(w.batches.find((b) => b.id === k.batchId)!),
     location: { id: l.id, name: l.name }, license: { id: license.id, licenseNumber: license.licenseNumber },
     activeSalesOrder: order ? { id: order.id, orderNumber: order.orderNumber } : null,
     primaryTestResult: null,
@@ -138,9 +105,9 @@ const isFullLabel = (search: string | undefined) => search !== undefined && /^[A
 function transferRow(w: World, t: StockTransfer) {
   return {
     id: t.id, stockTransferNumber: t.number,
-    // Every transfer is completed at once, and the world keeps one instant for it.
-    status: "COMPLETED", transferDatetime: t.transferDatetime, completedAt: t.transferDatetime,
-    description: t.description, customFields: noCustomFields,
+    // Every transfer completes when it is recorded.
+    status: "COMPLETED", transferDatetime: t.transferDatetime, completedAt: t.completedAt,
+    description: t.description, customFields: customFieldValues(w, "STOCK_TRANSFER"),
     fromLocation: location(w, t.fromLocationId), toLocation: location(w, t.toLocationId),
     items: t.items.map((i) => {
       const batch = i.batchId ? w.batches.find((b) => b.id === i.batchId)! : null;
@@ -200,7 +167,7 @@ function holdings(w: World, p: Product): Holding[] {
   const plain = (rows: StockRow[], batch: Batch | null) => rows.map((r) => ({ product: p, locationId: r.locationId, quantity: r.quantity, batch, pkg: null }));
   if (p.tracking === "PRODUCT") return plain(p.stock, null);
   if (p.tracking === "BATCH") return w.batches.filter((b) => b.productId === p.id).flatMap((b) => plain(b.stock, b));
-  return w.packages.filter((k) => k.productId === p.id && k.status === "ACTIVE").map((k) => ({ product: p, locationId: k.locationId, quantity: k.quantity, batch: null, pkg: k }));
+  return w.packages.filter((k) => k.productId === p.id && k.status === "ACTIVE").map((k) => ({ product: p, locationId: k.locationId, quantity: k.quantity, batch: w.batches.find((b) => b.id === k.batchId)!, pkg: k }));
 }
 
 function assetRow(w: World, h: Holding) {
@@ -211,9 +178,11 @@ function assetRow(w: World, h: Holding) {
     product: p.active ? p.name : `${p.name} (INACTIVE)`, productId: p.id, license: license.name, licenseId: license.id, location: l.name, locationId: l.id,
     packageNumber: h.pkg?.metrcLabel ?? null, packageId: h.pkg?.id ?? null, batchNumber: h.batch?.batchNumber ?? null, batchId: h.batch?.id ?? null,
     sku: p.sku, vendor: companyName(w, p.vendorId) ?? "", vendorId: p.vendorId ?? "", owner: null, unitType: unitTypeOf(w, p).name,
-    activeQuantity: qty(h.quantity), assemblingQuantity: "0", sellingQuantity: "0", category: categoryOf(w, p), subcategory: subcategoryOf(w, p),
+    activeQuantity: qty(h.quantity), assemblingQuantity: "0", sellingQuantity: "0", category: categoryOf(w, p).name, subcategory: subcategoryName(w, p),
     unitPrice: money(p.unitPrice), unitCostActual: unitCost, unitCostDefault: unitCost, totalCostActual: totalCost, totalCostDefault: totalCost,
-    expirationDate: null, trackingMethod: p.tracking, harvestDate: null, labTestingState: h.pkg ? LAB_STATE[h.pkg.labTestingState] : null, customFields: noCustomFields,
+    expirationDate: null, trackingMethod: p.tracking, harvestDate: null, labTestingState: h.pkg ? LAB_STATE[h.pkg.labTestingState] : null,
+    // An asset row is a batch or a package when the product is tracked that way, and a product otherwise.
+    customFields: reportCustomFields(w, h.pkg ? "PACKAGE" : h.batch ? "BATCH" : "PRODUCT"),
   };
 }
 
@@ -238,8 +207,9 @@ export const tools = [
       const licenseId = args.licenseId === undefined ? undefined : normalizeId(args.licenseId, PREFIX.license);
       const stocks = (l: Location) => w.packages.some((k) => k.locationId === l.id && k.status === "ACTIVE" && productIds!.includes(k.productId));
       let locations = w.locations.filter((l) => inList(ids, l.id) && (!licenseId || l.licenseId === licenseId) && (!args.complianceType || licenseOf(w, l).complianceType === args.complianceType)
-        && (!productIds || stocks(l)) && matches(args.search, l.name));
-      // The documentation ranks a search by name similarity unless sortBy is sent; a substring match in stored order is the closest this world gets.
+        && (!productIds || stocks(l)));
+      // With search, name similarity ranks; an explicit sortBy wins and similarity breaks its ties (the sort is stable).
+      if (args.search) locations = ranked(locations, (l) => closeness(args.search!, [l.name]));
       // Locations carry no timestamps, so creation order stands in for both of them.
       if (!args.search || args.sortBy) locations = sorted(locations, args.sortBy, { INSERTED_AT: (l) => serial(l.id), UPDATED_AT: (l) => serial(l.id), NAME: (l) => l.name }, { field: "UPDATED_AT", direction: "DESC" });
       return page(locations, args, (l) => locationRow(w, l));
@@ -249,17 +219,17 @@ export const tools = [
   defineTool<World>({
     name: "search-batches",
     supports: ["limit", "cursor", "ids", "productIds", ...PRODUCT_FILTERS, "productStatus", "search", "sortBy"],
-    run(args: Paging & ProductFilters & { ids?: string[]; productIds?: string[]; productStatus?: "ACTIVE" | "ANY" | "INACTIVE"; search?: string }, { world: w }) {
+    run(args: Paging & ProductFilters & { ids?: string[]; productIds?: string[]; productStatus?: Status; search?: string }, { world: w }) {
       const ids = normalizeIds(args.ids, PREFIX.batch), productIds = normalizeIds(args.productIds, PREFIX.product), ofKind = productFilter(w, args);
-      const status = args.productStatus ?? "ACTIVE";
-      let batches = w.batches.filter((b) => {
+      const found = w.batches.filter((b) => {
         const p = productOf(w, b.productId);
-        return p.tracking === "BATCH" && inList(ids, b.id) && inList(productIds, p.id) && ofKind(p) && (status === "ANY" || p.active === (status === "ACTIVE"))
-          && matches(args.search, b.batchNumber, p.name, p.sku);
+        return p.tracking === "BATCH" && inList(ids, b.id) && inList(productIds, p.id) && ofKind(p) && inStatus(args.productStatus, p.active);
       });
-      // With search the documentation ranks by batch-name similarity; a substring match in stored order is the closest this world gets.
-      // Batches are never edited after they are created, so creation time stands in for the update time.
-      if (!args.search) batches = sorted(batches, args.sortBy, { BATCH_NUMBER: (b) => b.batchNumber, INSERTED_AT: (b) => time(b.createdAt), UPDATED_AT: (b) => time(b.createdAt) }, { field: "UPDATED_AT", direction: "DESC" });
+      // A batch's name is its batch number here, so batch-name similarity ranks the batches whose number matches first.
+      const batches = args.search
+        ? ranked(found, (b) => { const p = productOf(w, b.productId); return tiers(closeness(args.search!, [b.batchNumber]), closeness(args.search!, [p.name, p.sku])); })
+        // Batches are never edited after they are created, so creation time stands in for the update time.
+        : sorted(found, args.sortBy, { BATCH_NUMBER: (b) => b.batchNumber, INSERTED_AT: (b) => time(b.createdAt), UPDATED_AT: (b) => time(b.createdAt) }, { field: "UPDATED_AT", direction: "DESC" });
       return page(batches, args, (b) => batchRow(w, b));
     },
   }),
@@ -273,9 +243,9 @@ export const tools = [
       const p = productOf(w, b.productId);
       return {
         batch: {
-          ...batchHeader(w, b), description: null, thc: null, cbd: null, url: `https://app.distru.com/inventory/batches/${serial(b.id)}`,
+          ...batchHeader(w, b), description: null, thc: null, cbd: null, url: recordUrl("batch", b.id),
           product: { id: p.id, name: p.name }, owner: null, primaryTestResult: null,
-          ...(args.includeActiveQuantitiesByLocation ? { activeQuantitiesByLocation: quantitiesByLocation(w, b.stock) } : {}),
+          ...(args.includeActiveQuantitiesByLocation ? { activeQuantitiesByLocation: quantitiesByLocation(w, batchStock(w, b)) } : {}),
           // The world records one cost per product and no cost entries, so there is no breakdown to show.
           ...(args.includeActiveQuantityCostItems ? { activeQuantityCostItems: null } : {}),
         },
@@ -287,7 +257,7 @@ export const tools = [
     name: "search-packages",
     supports: ["limit", "cursor", "ids", "licenseIds", "locationIds", "productIds", ...PRODUCT_FILTERS, "search", "status", "distruStatuses", "withQuantity", "labTestingStates", "syncing", "sortBy"],
     run(args: Paging & ProductFilters & {
-      ids?: string[]; licenseIds?: string[]; locationIds?: string[]; productIds?: string[]; search?: string; status?: "ACTIVE" | "ANY" | "INACTIVE";
+      ids?: string[]; licenseIds?: string[]; locationIds?: string[]; productIds?: string[]; search?: string; status?: Status;
       distruStatuses?: string[]; withQuantity?: boolean; labTestingStates?: string[]; syncing?: boolean;
     }, { world: w }) {
       const ids = normalizeIds(args.ids, PREFIX.package), licenseIds = normalizeIds(args.licenseIds, PREFIX.license);
@@ -295,19 +265,22 @@ export const tools = [
       const fullLabel = isFullLabel(args.search);
       const withQuantity = args.withQuantity ?? (ids || fullLabel ? undefined : true);
       // Every package is active in Distru (none is hidden), so only INACTIVE narrows anything.
-      const hidden = (args.status ?? "ACTIVE") === "INACTIVE";
-      const labelMatches = (k: Package) => (fullLabel ? k.metrcLabel.toLowerCase() === args.search!.toLowerCase() : matches(args.search, k.metrcLabel));
-      let packages = w.packages.filter((k) => {
+      const shown = inStatus(args.status, true);
+      const found = w.packages.filter((k) => {
         const p = productOf(w, k.productId);
-        return p.active && !hidden && inList(ids, k.id) && inList(licenseIds, k.licenseId) && inList(locationIds, k.locationId) && inList(productIds, p.id) && ofKind(p)
-          && (!args.distruStatuses || args.distruStatuses.includes(k.status)) && (withQuantity === undefined || (k.quantity > 0) === withQuantity)
-          && (!args.labTestingStates || args.labTestingStates.includes(LAB_STATE[k.labTestingState])) && (args.syncing === undefined || (pendingSync(w, k) !== undefined) === args.syncing)
-          && (labelMatches(k) || (!fullLabel && matches(args.search, p.name, p.sku)));
+        return p.active && shown && inList(ids, k.id) && inList(licenseIds, k.licenseId) && inList(locationIds, k.locationId) && inList(productIds, p.id) && ofKind(p)
+          && inList(args.distruStatuses, k.status) && (withQuantity === undefined || (k.quantity > 0) === withQuantity)
+          && inList(args.labTestingStates, LAB_STATE[k.labTestingState]) && (args.syncing === undefined || (pendingSync(w, k) !== undefined) === args.syncing);
       });
-      // With search, label matches rank first and product matches after, each in stored order; sortBy is ignored.
-      packages = args.search
-        ? [...packages].sort((a, b) => Number(!labelMatches(a)) - Number(!labelMatches(b)))
-        : sorted(packages, args.sortBy, { COMPLIANCE_LABEL: (k) => k.metrcLabel, INSERTED_AT: (k) => time(k.createdAt), QUANTITY: (k) => k.quantity, UPDATED_AT: (k) => time(k.createdAt) }, { field: "UPDATED_AT", direction: "DESC" });
+      // A full label is looked up exactly. Otherwise label matches rank first, then the product's name or SKU (its name also within a typo); sortBy is ignored.
+      const score = (k: Package) => {
+        if (fullLabel) return k.metrcLabel.toLowerCase() === args.search!.toLowerCase() ? 0 : undefined;
+        const p = productOf(w, k.productId);
+        return tiers(closeness(args.search!, [k.metrcLabel]), closeness(args.search!, [p.sku], [p.name]));
+      };
+      const packages = args.search
+        ? ranked(found, score)
+        : sorted(found, args.sortBy, { COMPLIANCE_LABEL: (k) => k.metrcLabel, INSERTED_AT: (k) => time(k.createdAt), QUANTITY: (k) => k.quantity, UPDATED_AT: (k) => time(k.createdAt) }, { field: "UPDATED_AT", direction: "DESC" });
       return page(packages, args, (k) => packageRow(w, k));
     },
   }),
@@ -340,11 +313,18 @@ export const tools = [
       }
       const id = newId(w, PREFIX.stockTransfer);
       const transfer: StockTransfer = {
-        id, number: `ST-${serial(id)}`, fromLocationId: from.id, toLocationId: to.id, description: args.description ?? null, transferDatetime,
+        id, number: `ST-${serial(id)}`, fromLocationId: from.id, toLocationId: to.id, description: args.description ?? null, transferDatetime, completedAt: stamp(c),
         items: lines.map((l) => ({ productId: l.product.id, batchId: l.batch?.id ?? null, quantity: l.quantity })),
       };
       w.stockTransfers.push(transfer);
-      recordAction(c, [{ type: "STOCK_TRANSFER", id: transfer.id, name: transfer.number, op: "INSERT", rowLabel: null, fields: [] }]);
+      const head = { type: "STOCK_TRANSFER" as const, id: transfer.id, name: transfer.number };
+      recordAction(c, [
+        { ...head, entity: "STOCK_TRANSFER", rowId: transfer.id, op: "INSERT", rowLabel: null, fields: [
+          { field: "fromLocationId", label: "From", oldValue: null, newValue: from.name }, { field: "toLocationId", label: "To", oldValue: null, newValue: to.name },
+        ] },
+        // The world gives a transfer's lines no id.
+        ...lines.map((l) => ({ ...head, entity: "STOCK_TRANSFER_ITEM" as const, rowId: null, op: "INSERT" as const, rowLabel: l.product.name, fields: [{ field: "quantity", label: "Quantity", oldValue: null, newValue: qty(l.quantity) }] })),
+      ]);
       return { stockTransfer: transferRow(w, transfer) };
     },
   }),
@@ -367,13 +347,14 @@ export const tools = [
         && (!productIds || t.items.some((i) => productIds.includes(i.productId))) && (!batchIds || t.items.some((i) => inList(batchIds, i.batchId)))
         // Lines in this world never carry a package: stock moved by package goes through distru-move-packages.
         && !packageIds
-        && within(t.transferDatetime, ...initiated) && within(t.transferDatetime, ...completed) && matches(args.search, t.number));
-      // With search the documentation ranks by closeness to the number; a substring match in stored order is the closest this world gets.
-      if (!args.search) {
-        transfers = sorted(transfers, args.sortBy, {
-          COMPLETED_AT: (t) => time(t.transferDatetime), INITIATED_AT: (t) => time(t.transferDatetime), INSERTED_AT: (t) => serial(t.id), STOCK_TRANSFER_NUMBER: (t) => serial(t.id), UPDATED_AT: (t) => serial(t.id),
+        && within(t.transferDatetime, ...initiated) && within(t.completedAt, ...completed));
+      // With search, closeness to the number ranks and sortBy is ignored.
+      transfers = args.search
+        ? ranked(transfers, (t) => closeness(args.search!, [t.number]))
+        : sorted(transfers, args.sortBy, {
+          // Transfers are never edited after they complete, so the order they were recorded in is the order they last changed.
+          COMPLETED_AT: (t) => time(t.completedAt), INITIATED_AT: (t) => time(t.transferDatetime), INSERTED_AT: (t) => serial(t.id), STOCK_TRANSFER_NUMBER: (t) => serial(t.id), UPDATED_AT: (t) => serial(t.id),
         }, { field: "UPDATED_AT", direction: "DESC" });
-      }
       return page(transfers, args, (t) => transferRow(w, t));
     },
   }),

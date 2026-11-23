@@ -1,7 +1,10 @@
 // Builds the benchmark company as of a given day. Everything is derived from that day and a fixed random
 // seed, so the same day always gives the same world, and "yesterday" or "last quarter" always have data.
 import { addDays, isoIn, zoned } from "../../src/core/kit.ts";
-import { PREFIX, orderTotal, purchaseTotal, type Action, type Company, type Contact, type Id, type Product, type PurchaseOrder, type SalesOrder, type World } from "./world.ts";
+import {
+  PREFIX, orderTotal, purchaseTotal,
+  type Action, type ActionRow, type Batch, type Company, type Contact, type Id, type Product, type PurchaseOrder, type RecordType, type RowEntity, type SalesOrder, type World,
+} from "./world.ts";
 
 export const TIMEZONE = "America/Los_Angeles";
 
@@ -50,8 +53,8 @@ export function createWorld(today: string): World {
   const [maya, daniel, priya, tom, lena] = users as [typeof users[0], typeof users[0], typeof users[0], typeof users[0], typeof users[0]];
 
   const licenses = [
-    { id: id(PREFIX.license), licenseNumber: "C11-0000482-LIC", name: "Tidewater Distribution", kind: "DISTRIBUTION" as const, complianceType: "METRC" as const, active: true },
-    { id: id(PREFIX.license), licenseNumber: "CCL19-0003371", name: "Tidewater Cultivation", kind: "CULTIVATION" as const, complianceType: "METRC" as const, active: true },
+    { id: id(PREFIX.license), licenseNumber: "C11-0000482-LIC", name: "Tidewater Distribution", kind: "DISTRIBUTION" as const, complianceType: "METRC" as const, active: true, expiryDate: addDays(today, 240) },
+    { id: id(PREFIX.license), licenseNumber: "CCL19-0003371", name: "Tidewater Cultivation", kind: "CULTIVATION" as const, complianceType: "METRC" as const, active: true, expiryDate: addDays(today, 310) },
   ];
   const [dist, cult] = licenses as [typeof licenses[0], typeof licenses[0]];
   const locations = [["Vault", dist], ["Shipping Room", dist], ["Processing Room", dist], ["Flower Room A", cult], ["Veg Room", cult], ["Dry Room", cult]]
@@ -178,18 +181,26 @@ export function createWorld(today: string): World {
   const label = (kind: "A4E2" | "9B7E", n: number) => `1A40603000${kind === "A4E2" ? "0A4E2" : "09B7E"}${String(n).padStart(9, "0")}`;
   const batches: World["batches"] = [];
   const packages: World["packages"] = [];
+  const addBatch = (p: Product, stock: Batch["stock"], createdAt = ago(60 + batches.length)): Batch => {
+    const b = { id: id(PREFIX.batch), productId: p.id, batchNumber: `LOT-${2200 + batches.length * 7}`, thcPercent: p.thcPercent, createdAt, stock };
+    batches.push(b);
+    return b;
+  };
+  // A batch-tracked product holds its stock in its batch, between the vault and the shipping room.
+  for (const p of products.filter((x) => x.tracking === "BATCH")) {
+    const total = onHand.get(p.id)!, inShipping = p.name === "Blue Dream 3.5g" ? 10 : Math.floor(total / 5);
+    addBatch(p, total ? [{ locationId: vault.id, quantity: total - inShipping }, { locationId: shipping.id, quantity: inShipping }].filter((s) => s.quantity > 0) : []);
+  }
+  // A package-tracked product's packages all come from one batch, which holds no stock of its own.
+  const lotOf = new Map(products.filter((x) => x.tracking === "PACKAGE").map((p) => [p.id, addBatch(p, []).id]));
   let labelNo = 20410;
   for (const p of products) {
     const total = onHand.get(p.id)!;
     if (p.tracking === "PRODUCT") {
       p.stock = total ? [{ locationId: vault.id, quantity: total - Math.floor(total / 4) }, { locationId: shipping.id, quantity: Math.floor(total / 4) }] : [];
-    } else if (p.tracking === "BATCH") {
-      const inShipping = p.name === "Blue Dream 3.5g" ? 10 : Math.floor(total / 5);
-      batches.push({ id: id(PREFIX.batch), productId: p.id, batchNumber: `LOT-${2200 + batches.length * 7}`, thcPercent: p.thcPercent, createdAt: ago(60 + batches.length),
-        stock: total ? [{ locationId: vault.id, quantity: total - inShipping }, { locationId: shipping.id, quantity: inShipping }].filter((s) => s.quantity > 0) : [] });
-    } else {
+    } else if (p.tracking === "PACKAGE") {
       const parts = total === 0 ? [0] : total < 120 ? [total] : [Math.ceil(total / 2), Math.floor(total / 2)];
-      for (const quantity of parts) packages.push({ id: id(PREFIX.package), productId: p.id, metrcLabel: label("A4E2", labelNo++), quantity, locationId: vault.id, licenseId: dist.id,
+      for (const quantity of parts) packages.push({ id: id(PREFIX.package), productId: p.id, batchId: lotOf.get(p.id)!, metrcLabel: label("A4E2", labelNo++), quantity, locationId: vault.id, licenseId: dist.id,
         status: quantity ? "ACTIVE" : "FINISHED", labTestingState: "TestPassed", createdAt: ago(45 + packages.length) });
     }
   }
@@ -265,7 +276,10 @@ export function createWorld(today: string): World {
     const inv = { id: id(PREFIX.invoice), invoiceNumber: o.orderNumber.replace("SO", "INV"), salesOrderId: o.id, customerId: o.customerId, ownerId: o.ownerId, invoiceDatetime: o.deliveryDatetime ?? o.orderDatetime, dueDatetime: o.dueDatetime, voided: o === voidedLate };
     invoices.push(inv);
     const total = orderTotal(o), dueDay = o.dueDatetime.slice(0, 10);
-    const pay = (amount: number, day: string) => invoicePayments.push({ id: id(PREFIX.invoicePayment), invoiceId: inv.id, amount, paymentDatetime: on(day, "11:00:00"), paymentMethodId: pick(paymentMethods).id, note: null, voided: false });
+    const pay = (amount: number, day: string) => {
+      const paymentId = id(PREFIX.invoicePayment), paymentDatetime = on(day, "11:00:00");
+      invoicePayments.push({ id: paymentId, paymentNumber: `PAY-${paymentId.split("_")[1]}`, invoiceId: inv.id, amount, paymentDatetime, recordedAt: paymentDatetime, paymentMethodId: pick(paymentMethods).id, note: null, voidedAt: null });
+    };
     if (lateUnpaid.includes(o) || dueRecently.includes(o) || o === voidedLate) continue;
     if (latePartial.includes(o)) pay(Math.round(total * 0.4), addDays(dueDay, -2));
     else if (addDays(dueDay, -5) <= today && o.status === "COMPLETED") pay(total, addDays(dueDay, -5));
@@ -283,17 +297,41 @@ export function createWorld(today: string): World {
     return po;
   };
   const yearStart = `${today.slice(0, 4)}-01-01`, intoYear = daysBetween(yearStart, today);
-  for (const v of vendors) for (let i = 0, n = int(2, 4); i < n; i++) addPurchase(v, addDays(yearStart, int(0, Math.max(0, intoYear - 45))));
+  // The regular purchases of the year, each paid in full two weeks later. None in the year's first 20 days, so that
+  // no payment falls after today: on those days "this year" has only the purchases placed below.
+  const regular = new Set<PurchaseOrder>();
+  if (intoYear >= 20) for (const v of vendors) for (let i = 0, n = int(2, 4); i < n; i++) regular.add(addPurchase(v, addDays(yearStart, int(0, intoYear - 20))));
   for (const v of [humboldt, sierraExtracts, sweetLeaf, caliVape]) addPurchase(v, addDays(yearStart, -int(5, 50))); // last year: not part of "this year"
   const unpaid = [addPurchase(mendocino, addDays(today, -9), { status: "PROCESSING" }), addPurchase(caliVape, addDays(today, -16), { status: "DELIVERING" }), addPurchase(sweetLeaf, addDays(today, -24))];
   const po1182 = addPurchase(humboldt, addDays(today, -21), { number: "PO-1182", items: [["Blue Dream 7g", 250, 25.6]] });
   const partial = addPurchase(sierraExtracts, addDays(today, -38));
   const overpaid = addPurchase(pacificPrerolls, addDays(today, -52));
   addPurchase(humboldt, addDays(yearStart, -70), { number: "PO-1128", items: [["OG Kush 3.5g", 300, 14.1]] });
+
+  // What each vendor was ordered this year, in thousands of dollars, which the vendor-spend question asks for. Planned,
+  // as customer revenue is, so that no two vendors are within 5% of each other: the regular purchases are scaled to
+  // make up each total once the purchases placed above that fall in this year are counted.
+  const vendorPlan: [Company, number][] = [[mendocino, 260], [humboldt, 215], [sierraExtracts, 180], [pacificPrerolls, 150], [caliVape, 124], [sweetLeaf, 100]];
+  const thisYear = (po: PurchaseOrder) => po.orderDatetime.slice(0, 4) === today.slice(0, 4);
+  for (const [v, thousands] of vendorPlan) {
+    const mine = purchaseOrders.filter((po) => po.vendorId === v.id && thisYear(po));
+    const scaled = mine.filter((po) => regular.has(po));
+    const fixed = mine.filter((po) => !regular.has(po)).reduce((n, po) => n + purchaseTotal(po), 0);
+    const natural = scaled.reduce((n, po) => n + purchaseTotal(po), 0);
+    if (!natural) continue;
+    const factor = (thousands * 1000 - fixed) / natural;
+    for (const item of scaled.flatMap((po) => po.items)) item.quantity = Math.max(1, Math.round(item.quantity * factor));
+  }
+
   const openPurchases = purchaseOrders.filter((p) => !p.purchaseNumber).sort((a, b) => a.orderDatetime.localeCompare(b.orderDatetime));
   openPurchases.forEach((p, i) => { p.purchaseNumber = `PO-${1181 - openPurchases.length + i}`; });
+  const yesterday = addDays(today, -1);
   for (const po of purchaseOrders) {
-    const pay = (amount: number, daysAfter: number) => purchasePayments.push({ id: id(PREFIX.purchasePayment), purchaseId: po.id, amount, paymentDatetime: on(addDays(po.orderDatetime.slice(0, 10), daysAfter), "15:00:00"), paymentMethodId: paymentMethods[0]!.id, note: null, voided: false });
+    const pay = (amount: number, daysAfter: number) => {
+      const paymentId = id(PREFIX.purchasePayment), day = addDays(po.orderDatetime.slice(0, 10), daysAfter);
+      const paymentDatetime = on(day < yesterday ? day : yesterday, "15:00:00");
+      purchasePayments.push({ id: paymentId, paymentNumber: `PMT-${paymentId.split("_")[1]}`, purchaseId: po.id, amount, paymentDatetime, recordedAt: paymentDatetime, paymentMethodId: paymentMethods[0]!.id, note: null, voidedAt: null });
+    };
     if (unpaid.includes(po)) continue;
     if (po === po1182) pay(1000, 3);
     else if (po === partial) pay(Math.round(purchaseTotal(po) / 2), 10);
@@ -317,7 +355,8 @@ export function createWorld(today: string): World {
   addTask("File the weekly compliance report", lena, 5, "COMPLETED");
 
   // ---------- Metrc ----------
-  const metrcPackages: World["metrcPackages"] = packages.filter((k) => k.status === "ACTIVE").map((k, i) => {
+  const distPackages = packages.filter((k) => k.status === "ACTIVE" && k.licenseId === dist.id);
+  const metrcPackages: World["metrcPackages"] = distPackages.map((k, i) => {
     const p = products.find((x) => x.id === k.productId)!;
     return { metrcId: 880100 + i, label: k.metrcLabel, licenseId: dist.id, itemName: p.name, itemCategory: categories.find((c) => c.id === p.categoryId)!.name, strainName: strains.find((s) => s.id === p.strainId)?.name ?? null,
       quantity: k.quantity, unitOfMeasure: "Each", status: "ACTIVE", importStatus: "IMPORTED", labTestingState: "TestPassed", metrcLocationName: "Vault", packagedDate: k.createdAt.slice(0, 10), lastModified: k.createdAt };
@@ -328,27 +367,41 @@ export function createWorld(today: string): World {
   ];
   notImported.forEach(([itemName, itemCategory, strainName, quantity, lic, room, age], i) => metrcPackages.push({ metrcId: 881500 + i, label: label("A4E2", 30771 + i * 13), licenseId: lic.id, itemName, itemCategory, strainName, quantity,
     unitOfMeasure: lic === cult ? "Grams" : "Each", status: "ACTIVE", importStatus: "UNIMPORTED", labTestingState: lic === cult ? "NotSubmitted" : "TestPassed", metrcLocationName: room, packagedDate: addDays(today, -age), lastModified: ago(age) }));
-  for (const [i, [itemName, strainName]] of ([["Gelato Bulk Flower", "Gelato"], ["Sour Diesel Bulk Flower", "Sour Diesel"]] as const).entries()) metrcPackages.push({ metrcId: 881700 + i, label: label("A4E2", 31900 + i), licenseId: cult.id, itemName, itemCategory: "Buds", strainName,
-    quantity: 5100 - i * 800, unitOfMeasure: "Grams", status: "ACTIVE", importStatus: "IMPORTED", labTestingState: "TestPassed", metrcLocationName: "Dry Room", packagedDate: addDays(today, -30), lastModified: ago(30) });
 
-  const activePackages = packages.filter((k) => k.status === "ACTIVE");
+  // The cultivation license's imported package: bulk flower in the dry room, with the house product it was imported as.
+  const bulk: Product = {
+    id: id(PREFIX.product), name: "Gelato Bulk Flower", sku: `FL-${1001 + products.length}`, active: true, categoryId: flower.id, subcategoryId: null, strainId: strainOf("Gelato"), brandId: null, vendorId: null,
+    groupId: groups[0]!.id, tagIds: [], unitTypeId: unitTypes[1]!.id, tracking: "PACKAGE", unitPrice: 4.5, unitCost: 1.9, thresholdMin: null, thresholdMax: null, reserved: 0, thcPercent: null, stock: [],
+    createdAt: ago(30), updatedAt: ago(30),
+  };
+  products.push(bulk);
+  const bulkPackage = { id: id(PREFIX.package), productId: bulk.id, batchId: addBatch(bulk, [], ago(30)).id, metrcLabel: label("A4E2", 31900), quantity: 5100, locationId: dryRoom.id, licenseId: cult.id,
+    status: "ACTIVE" as const, labTestingState: "TestPassed" as const, createdAt: ago(30) };
+  packages.push(bulkPackage);
+  metrcPackages.push({ metrcId: 881700, label: bulkPackage.metrcLabel, licenseId: cult.id, itemName: bulk.name, itemCategory: "Buds", strainName: "Gelato", quantity: bulkPackage.quantity, unitOfMeasure: "Grams",
+    status: "ACTIVE", importStatus: "IMPORTED", labTestingState: "TestPassed", metrcLocationName: dryRoom.name, packagedDate: addDays(today, -30), lastModified: ago(30) });
+
+  // The distribution license's Metrc queue. Activities sync one at a time in the order they were queued, and a failed
+  // one holds back every later one, so the license has one FAILED activity: yesterday afternoon's adjustment. The
+  // day before everything went through; yesterday's earlier changes did too; what was queued after the failure,
+  // yesterday and this morning, is still QUEUED behind it.
   const metrcActivities: World["metrcActivities"] = [];
   const addActivity = (type: World["metrcActivities"][0]["type"], daysAgo: number, time: string, status: World["metrcActivities"][0]["status"], lastError: string | null = null) => {
-    const k = activePackages[(metrcActivities.length * 5) % activePackages.length]!;
-    const verb = { ADJUST_PACKAGE: "Adjust package", MOVE_PACKAGE: "Move package", CREATE_PACKAGE: "Create package", FINISH_PACKAGE: "Finish package" }[type];
+    const k = distPackages[(metrcActivities.length * 5) % distPackages.length]!;
+    const verb = { ADJUST_PACKAGE: "Adjust package", CHANGE_PACKAGE_LOCATION: "Move package", CREATE_PACKAGE: "Create package", FINISH_PACKAGE: "Finish package" }[type];
     metrcActivities.push({ id: id(PREFIX.metrcActivity), type, title: `${verb} ${k.metrcLabel}`, description: `${verb} for ${products.find((p) => p.id === k.productId)!.name}`, status, lastError, licenseId: dist.id, creatorId: daysAgo % 2 ? lena.id : maya.id, packageId: k.id, insertedAt: ago(daysAgo, time) });
   };
   addActivity("ADJUST_PACKAGE", 2, "09:10:00", "COMPLETED");
-  addActivity("ADJUST_PACKAGE", 2, "15:40:00", "FAILED", "Metrc rejected the adjustment: the adjustment date is before the package's last modified date.");
-  addActivity("MOVE_PACKAGE", 2, "16:05:00", "COMPLETED");
+  addActivity("CHANGE_PACKAGE_LOCATION", 2, "11:30:00", "COMPLETED");
+  addActivity("ADJUST_PACKAGE", 2, "15:40:00", "COMPLETED");
+  addActivity("CHANGE_PACKAGE_LOCATION", 2, "16:05:00", "COMPLETED");
   addActivity("ADJUST_PACKAGE", 1, "08:50:00", "COMPLETED");
   addActivity("ADJUST_PACKAGE", 1, "09:20:00", "COMPLETED");
-  addActivity("MOVE_PACKAGE", 1, "10:15:00", "COMPLETED");
-  addActivity("ADJUST_PACKAGE", 1, "11:45:00", "FAILED", "Metrc rejected the adjustment: the quantity removed is more than the package holds in Metrc.");
-  addActivity("CREATE_PACKAGE", 1, "13:30:00", "COMPLETED");
-  addActivity("ADJUST_PACKAGE", 1, "14:05:00", "COMPLETED");
-  addActivity("ADJUST_PACKAGE", 1, "16:30:00", "COMPLETED");
-  addActivity("MOVE_PACKAGE", 1, "17:10:00", "COMPLETED");
+  addActivity("CHANGE_PACKAGE_LOCATION", 1, "10:15:00", "COMPLETED");
+  addActivity("CREATE_PACKAGE", 1, "11:45:00", "COMPLETED");
+  addActivity("ADJUST_PACKAGE", 1, "14:05:00", "FAILED", "Metrc rejected the adjustment: the quantity removed is more than the package holds in Metrc.");
+  addActivity("ADJUST_PACKAGE", 1, "15:30:00", "QUEUED");
+  addActivity("CHANGE_PACKAGE_LOCATION", 1, "17:10:00", "QUEUED");
   addActivity("ADJUST_PACKAGE", 0, "08:15:00", "QUEUED");
 
   const manifestPackage = (itemName: string, itemCategory: string, quantity: number, n: number) => ({ label: label("A4E2", n), itemName, itemCategory, quantity, unitOfMeasure: "Each", labTestingState: "TestPassed" });
@@ -366,7 +419,7 @@ export function createWorld(today: string): World {
   const plants: World["plants"] = [];
   let plantNo = 7301;
   const addGroup = (name: string, strainName: string, count: number, status: World["plants"][0]["status"], room: typeof vegRoom, age: number) => {
-    const g = { id: id(PREFIX.plantGroup), name, strainName, licenseId: cult.id, locationId: room.id, active: status !== "HARVESTED", plantedAt: ago(age) };
+    const g = { id: id(PREFIX.plantGroup), name, strainName, licenseId: cult.id, locationId: room.id, plantedAt: ago(age) };
     plantGroups.push(g);
     for (let i = 0; i < count; i++) plants.push({ id: id(PREFIX.plant), metrcLabel: label("9B7E", plantNo++), plantGroupId: g.id, status, plantedAt: g.plantedAt,
       floweredAt: status === "FLOWERING" || status === "HARVESTED" ? ago(age - 35) : null, harvestedAt: status === "HARVESTED" ? ago(age - 98) : null, isMother: false });
@@ -394,15 +447,18 @@ export function createWorld(today: string): World {
 
   // ---------- history ----------
   const actions: Action[] = [];
-  const act = (daysAgo: number, time: string, actor: typeof maya | null, source: Action["source"], records: Action["records"], sourceDetail: string | null = null) =>
+  const act = (daysAgo: number, time: string, actor: typeof maya | null, source: Action["source"], records: ActionRow[], sourceDetail: string | null = null) =>
     actions.push({ id: id(PREFIX.action), changedAt: ago(daysAgo, time), actorId: actor?.id ?? null, actorName: actor ? `${actor.firstName} ${actor.lastName}` : "Public API", source, sourceDetail, records });
-  const change = (type: string, record: { id: Id }, name: string, field: string, label: string, oldValue: string | null, newValue: string | null, rowLabel: string | null = null): Action["records"][0] =>
-    ({ type, id: record.id, name, op: "UPDATE", rowLabel, fields: [{ field, label, oldValue, newValue }] });
-  const created = (type: string, record: { id: Id }, name: string): Action["records"][0] => ({ type, id: record.id, name, op: "INSERT", rowLabel: null, fields: [] });
+  type Line = { entity: RowEntity; id: Id | null; label: string };
+  /** A change of one field, on the record's own row or on one of its lines. */
+  const change = (type: RecordType, record: { id: Id }, name: string, field: string, label: string, oldValue: string | null, newValue: string | null, line?: Line): ActionRow =>
+    ({ type, id: record.id, name, entity: line?.entity ?? type, rowId: line ? line.id : record.id, op: "UPDATE", rowLabel: line?.label ?? null, fields: [{ field, label, oldValue, newValue }] });
+  const created = (type: RecordType, record: { id: Id }, name: string): ActionRow => ({ type, id: record.id, name, entity: type, rowId: record.id, op: "INSERT", rowLabel: null, fields: [] });
+  const weddingCakeLine: Line = { entity: "ORDER_ITEM", id: so1042.items[0]!.id, label: "Wedding Cake 3.5g" };
 
   act(400, "10:12:00", daniel, "WEB", [created("SALES_ORDER", so1042, "SO-1042")]);
-  act(399, "09:05:00", daniel, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "quantity", "Quantity", "40", "60", "Wedding Cake 3.5g")]);
-  act(397, "14:37:00", priya, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "priceBase", "Price", "24.00", "19.50", "Wedding Cake 3.5g")]);
+  act(399, "09:05:00", daniel, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "quantity", "Quantity", "40", "60", weddingCakeLine)]);
+  act(397, "14:37:00", priya, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "priceBase", "Price", "24.00", "19.50", weddingCakeLine)]);
   act(396, "11:20:00", maya, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "status", "Status", "PENDING", "PROCESSING")]);
   act(395, "16:02:00", lena, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "dueDatetime", "Due date", ago(370, "17:00:00"), ago(363, "17:00:00"))]);
   act(392, "13:15:00", maya, "WEB", [change("SALES_ORDER", so1042, "SO-1042", "status", "Status", "PROCESSING", "COMPLETED")]);
@@ -418,7 +474,7 @@ export function createWorld(today: string): World {
   act(0, "08:02:00", null, "PUBLIC_API", [change("PRODUCT", product("OG Kush Live Resin 1g"), "OG Kush Live Resin 1g", "unitPrice", "Unit price", "30.00", "29.00")], api);
 
   return {
-    today, timezone: TIMEZONE, company: { id: "com_0", name: "Tidewater Cannabis Co.", state: "CA", complianceSystem: "METRC" }, me: maya.id,
+    today, timezone: TIMEZONE, company: { id: "com_0", name: "Tidewater Cannabis Co.", legalName: "Tidewater Cannabis Company, Inc.", state: "CA", complianceSystem: "METRC" }, me: maya.id,
     users, licenses, locations, categories, tags, groups, strains, unitTypes, paymentMethods, paymentTerms, companyGroups, customFields, companies, contacts, products, batches, packages,
     stockTransfers: [], salesOrders, invoices, invoicePayments, purchaseOrders, purchasePayments, tasks, menus, metrcPackages, metrcActivities, metrcManifests, plantGroups, plants, harvests, actions,
     outbox: [], nextId: Object.fromEntries(Object.entries(counters).map(([k, v]) => [k, v + 1])),

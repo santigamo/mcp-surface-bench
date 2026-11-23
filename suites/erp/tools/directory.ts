@@ -1,64 +1,8 @@
 // Customers, vendors, the signed-in company, their contacts, and the team's tasks.
-import { bound, isoIn, matches, money, normalizeId, normalizeIds, page, sorted, within, zoned, type SortBy } from "../../../src/core/kit.ts";
+import { bound, closeness, inList, isoIn, matches, money, normalizeId, normalizeIds, page, ranked, sorted, within, zoned, type SortBy } from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
-import { fullName, invoiceMoney, newId, PREFIX, type Company, type Contact, type Id, type Task, type World } from "../world.ts";
-import { find, named, recordAction, stamp, userRef, type C } from "./shared.ts";
-
-// ---------- helpers the purchasing tools use too ----------
-
-/** The custom fields defined for a kind of record. The world stores no values, so every one reads as unset. */
-export const customFieldValues = (w: World, entityType: string) =>
-  w.customFields.filter((f) => f.entityType === entityType).map((f) => ({ customField: { id: f.id, name: f.name, fieldType: f.fieldType }, value: null }));
-
-/** When a record last changed: its latest logged action, or when it was created. */
-export function lastChanged(w: World, type: string, id: Id, createdAt: string): string {
-  const times = w.actions.filter((a) => a.records.some((r) => r.type === type && r.id === id)).map((a) => a.changedAt);
-  return [createdAt, ...times].reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
-}
-
-const words = (s: string) => s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-
-function editDistance(a: string, b: string): number {
-  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    const next = [i];
-    for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j]! + 1, next[j - 1]! + 1, row[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
-    row = next;
-  }
-  return row[b.length]!;
-}
-
-/** Every word of the term within a typo (one per four letters) of a word of the field: the summed distance, else undefined. */
-function typoDistance(term: string, field: string): number | undefined {
-  const termWords = words(term), fieldWords = words(field);
-  if (!termWords.length || !fieldWords.length) return undefined;
-  let total = 0;
-  for (const t of termWords) {
-    const d = Math.min(...fieldWords.map((f) => editDistance(t, f)));
-    if (d > Math.floor(t.length / 4)) return undefined;
-    total += d;
-  }
-  return total;
-}
-
-/**
- * How closely a search term names a record, lower is closer, undefined when it does not match. A case-insensitive
- * substring of any of `exact` or `fuzzy` scores the characters the field has beyond the term, so the shortest
- * containing name ranks first; a typo-level match on one of `fuzzy` ranks after every substring match.
- */
-export function closeness(term: string, exact: (string | null)[], fuzzy: (string | null)[] = []): number | undefined {
-  const t = term.toLowerCase();
-  const fields = [...exact, ...fuzzy].filter((f): f is string => !!f);
-  const contained = fields.filter((f) => f.toLowerCase().includes(t)).map((f) => f.length - t.length);
-  if (contained.length) return Math.min(...contained);
-  const typos = fuzzy.flatMap((f) => (f ? [typoDistance(t, f)] : [])).filter((d): d is number => d !== undefined);
-  return typos.length ? 1_000_000 + Math.min(...typos) : undefined;
-}
-
-/** The items a search term matches, closest first; ties keep their order. */
-export function ranked<T>(items: T[], term: string, score: (item: T) => number | undefined): T[] {
-  return items.flatMap((item) => { const s = score(item); return s === undefined ? [] : [{ item, s }]; }).sort((a, b) => a.s - b.s).map((x) => x.item);
-}
+import { fullName, invoiceMoney, lastChanged, newId, PREFIX, type ActionRow, type Company, type Contact, type Id, type Task, type World } from "../world.ts";
+import { customFieldValues, find, named, recordAction, stamp, userRef, type C } from "./shared.ts";
 
 // ---------- companies ----------
 
@@ -70,16 +14,13 @@ type Listed = Omit<Company, "relationship" | "city" | "zip"> & { mine: boolean; 
 
 function listed(w: World): Listed[] {
   const own: Listed = {
-    id: w.company.id, name: w.company.name, legalName: myLegalName(w), mine: true, ownerId: null, invoiceEmail: null, phone: null, city: null, state: w.company.state, zip: null,
+    id: w.company.id, name: w.company.name, legalName: w.company.legalName, mine: true, ownerId: null, invoiceEmail: null, phone: null, city: null, state: w.company.state, zip: null,
     licenseNumber: null, groupId: null, paymentTermId: null,
     // The world does not say when the company joined; it predates every counterparty.
     createdAt: w.companies.map((c) => c.createdAt).reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a)),
   };
   return [own, ...w.companies.map((c) => ({ ...c, mine: false }))];
 }
-
-/** The signed-in company's legal name, as get-me prints it. */
-const myLegalName = (w: World) => `${w.company.name.replace(/ Co\.$/, "")} Company, Inc.`;
 
 const licenseNumbers = (w: World, c: Listed) => (c.mine ? w.licenses.map((l) => l.licenseNumber) : c.licenseNumber ? [c.licenseNumber] : []);
 
@@ -135,9 +76,10 @@ const addresses = (c: Listed) =>
   c.city === null ? [] : [{ id: `cloc_${companyNumber(c)}`, name: c.name, streetAddress: "", city: c.city, state: c.state, zip: c.zip ?? "", country: "US", license: c.licenseNumber ? { id: `clic_${companyNumber(c)}`, licenseNumber: c.licenseNumber } : null }];
 
 function licenses(w: World, c: Listed) {
-  // The world records no license dates; expiry is shown as the end of next year.
-  const expiryDatetime = isoIn(w.timezone, zoned(w.timezone, `${+w.today.slice(0, 4) + 1}-12-31`, "23:59:59"));
-  if (c.mine) return w.licenses.map((l) => ({ id: l.id, licenseNumber: l.licenseNumber, licenseType: l.kind, complianceType: l.complianceType, isActive: l.active, issueDatetime: null, expiryDatetime }));
+  const endOf = (ymd: string) => isoIn(w.timezone, zoned(w.timezone, ymd, "23:59:59"));
+  if (c.mine) return w.licenses.map((l) => ({ id: l.id, licenseNumber: l.licenseNumber, licenseType: l.kind, complianceType: l.complianceType, isActive: l.active, issueDatetime: null, expiryDatetime: endOf(l.expiryDate) }));
+  // The world records no dates for a counterparty's license; its expiry is shown as the end of next year.
+  const expiryDatetime = endOf(`${+w.today.slice(0, 4) + 1}-12-31`);
   return c.licenseNumber ? [{ id: `clic_${companyNumber(c)}`, licenseNumber: c.licenseNumber, licenseType: "", complianceType: "METRC" as const, isActive: true, issueDatetime: null, expiryDatetime }] : [];
 }
 
@@ -150,15 +92,15 @@ function searchCompanies(w: World, args: CompanySearch) {
   const ids = normalizeIds(args.ids, PREFIX.company), groupIds = normalizeIds(args.groupIds, PREFIX.companyGroup);
   const after = bound(args.lastOrderDateAfter, "after", w.timezone), before = bound(args.lastOrderDateBefore, "before", w.timezone);
   const hits = listed(w).filter((c) =>
-    (!ids || ids.includes(c.id)) &&
+    inList(ids, c.id) &&
     (args.isMyCompany === undefined || c.mine === args.isMyCompany) &&
     matches(args.city, c.city) &&
     (args.zip === undefined || c.zip?.toLowerCase() === args.zip.toLowerCase()) &&
     (args.licenseNumber === undefined || matches(args.licenseNumber, ...licenseNumbers(w, c))) &&
-    (!groupIds || (c.groupId !== null && groupIds.includes(c.groupId))) &&
+    inList(groupIds, c.groupId) &&
     (args.hasOutstandingBalance === undefined || balances(w, c).outstanding > 0 === args.hasOutstandingBalance) &&
     within(lastOrderDate(w, c), after, before));
-  if (args.search) return ranked(hits, args.search, (c) => closeness(args.search!, [], [c.name, c.legalName]));
+  if (args.search) return ranked(hits, (c) => closeness(args.search!, [], [c.name, c.legalName]));
   const fields = {
     NAME: (c: Listed) => c.name, INSERTED_AT: (c: Listed) => Date.parse(c.createdAt), UPDATED_AT: (c: Listed) => Date.parse(lastChanged(w, "COMPANY", c.id, c.createdAt)),
     OUTSTANDING_BALANCE: (c: Listed) => balances(w, c).outstanding, PAST_DUE_BALANCE: (c: Listed) => balances(w, c).pastDue,
@@ -191,10 +133,16 @@ function contactValues(w: World, args: ContactArgs): Partial<Contact> {
   return values;
 }
 
-function contactChanges(before: Partial<Contact>, after: Contact) {
+function contactChanges(before: Partial<Contact>, after: Partial<Contact>) {
   return (Object.keys(LABELS) as (keyof typeof LABELS)[])
     .filter((k) => (before[k] ?? null) !== after[k])
     .map((k) => ({ field: k, label: LABELS[k], oldValue: before[k] ?? null, newValue: after[k] ?? null }));
+}
+
+/** A contact is a line of its company: a change to it is a CONTACT row in the company's history. */
+function contactRow(w: World, contact: Contact, op: ActionRow["op"], fields: ActionRow["fields"]): ActionRow {
+  const company = companyById(w, contact.companyId)!;
+  return { type: "COMPANY", id: company.id, name: company.name, entity: "CONTACT", rowId: contact.id, op, rowLabel: fullName(contact), fields };
 }
 
 function createContact(c: C, args: ContactArgs) {
@@ -205,7 +153,7 @@ function createContact(c: C, args: ContactArgs) {
   const values = contactValues(w, args);
   const contact: Contact = { id: newId(w, PREFIX.contact), companyId: company.id, firstName: "", lastName: null, title: null, email: null, phone: null, ownerId: null, createdAt: stamp(c), ...values };
   w.contacts.push(contact);
-  recordAction(c, [{ type: "CONTACT", id: contact.id, name: fullName(contact), op: "INSERT", rowLabel: null, fields: contactChanges({}, contact) }]);
+  recordAction(c, [contactRow(w, contact, "INSERT", contactChanges({}, contact))]);
   return { contact: contactView(w, contact) };
 }
 
@@ -214,13 +162,13 @@ function updateContact(c: C, args: ContactArgs, contact: Contact) {
   const values = contactValues(c.world, args);
   const before = { ...contact };
   Object.assign(contact, values);
-  recordAction(c, [{ type: "CONTACT", id: contact.id, name: fullName(contact), op: "UPDATE", rowLabel: null, fields: contactChanges(before, contact) }]);
+  recordAction(c, [contactRow(c.world, contact, "UPDATE", contactChanges(before, contact))]);
   return { contact: contactView(c.world, contact) };
 }
 
 function deleteContact(c: C, contact: Contact) {
   c.world.contacts.splice(c.world.contacts.indexOf(contact), 1);
-  recordAction(c, [{ type: "CONTACT", id: contact.id, name: fullName(contact), op: "DELETE", rowLabel: null, fields: [] }]);
+  recordAction(c, [contactRow(c.world, contact, "DELETE", contactChanges(contact, {}))]);
   return { id: contact.id };
 }
 
@@ -253,7 +201,8 @@ function taskView(w: World, t: Task) {
   const invoice = w.invoices.find((i) => i.id === linked("INVOICE"));
   const product = w.products.find((p) => p.id === linked("PRODUCT"));
   return {
-    id: t.id, name: t.name, description: t.description, status: t.status, dueDate: t.dueDate, color: null, insertedAt: t.createdAt, updatedAt: lastChanged(w, "TASK", t.id, t.createdAt),
+    // No tool changes a task, so it last changed when it was created.
+    id: t.id, name: t.name, description: t.description, status: t.status, dueDate: t.dueDate, color: null, insertedAt: t.createdAt, updatedAt: t.createdAt,
     relatedType: t.related?.type ?? null, company: named(w.companies, linked("COMPANY")),
     salesOrder: order ? { id: order.id, orderNumber: order.orderNumber } : null,
     purchaseOrder: purchase ? { id: purchase.id, purchaseNumber: purchase.purchaseNumber } : null,
@@ -268,15 +217,15 @@ function searchTasks(w: World, args: TaskSearch) {
   const ids = normalizeIds(args.ids, PREFIX.task), ownerIds = normalizeIds(args.ownerIds, PREFIX.user), link = taskLink(args);
   const after = bound(args.dueDateAfter, "after", w.timezone), before = bound(args.dueDateBefore, "before", w.timezone);
   const hits = w.tasks.filter((t) =>
-    (!ids || ids.includes(t.id)) &&
-    (!args.statuses || args.statuses.includes(t.status)) &&
-    (!ownerIds || (t.ownerId !== null && ownerIds.includes(t.ownerId))) &&
+    inList(ids, t.id) &&
+    inList(args.statuses, t.status) &&
+    inList(ownerIds, t.ownerId) &&
     within(t.dueDate, after, before) &&
     (!args.relatedTypes || (t.related !== null && args.relatedTypes.includes(t.related.type))) &&
     (!link || (t.related?.type === link.type && link.ids.includes(t.related.id))));
-  if (args.search) return ranked(hits, args.search, (t) => closeness(args.search!, [t.name]));
+  if (args.search) return ranked(hits, (t) => closeness(args.search!, [t.name]));
   return sorted(hits, args.sortBy, {
-    DUE_DATE: (t) => Date.parse(t.dueDate), INSERTED_AT: (t) => Date.parse(t.createdAt), NAME: (t) => t.name, UPDATED_AT: (t) => Date.parse(lastChanged(w, "TASK", t.id, t.createdAt)),
+    DUE_DATE: (t) => Date.parse(t.dueDate), INSERTED_AT: (t) => Date.parse(t.createdAt), NAME: (t) => t.name, UPDATED_AT: (t) => Date.parse(t.createdAt),
   }, { field: "UPDATED_AT", direction: "DESC" });
 }
 
@@ -316,9 +265,9 @@ export const tools = [
       const ids = normalizeIds(args.ids, PREFIX.contact), companyIds = normalizeIds(args.companyIds, PREFIX.company);
       const companyName = (k: Contact) => companyById(w, k.companyId)?.name ?? null;
       const updatedAt = (k: Contact) => lastChanged(w, "CONTACT", k.id, k.createdAt);
-      const hits = w.contacts.filter((k) => (!ids || ids.includes(k.id)) && (!companyIds || companyIds.includes(k.companyId)));
+      const hits = w.contacts.filter((k) => inList(ids, k.id) && inList(companyIds, k.companyId));
       const ordered = args.search
-        ? ranked(hits, args.search, (k) => closeness(args.search!, [k.email], [fullName(k), companyName(k)]))
+        ? ranked(hits, (k) => closeness(args.search!, [k.email], [fullName(k), companyName(k)]))
         : sorted(hits, args.sortBy, { FULL_NAME: fullName, INSERTED_AT: (k) => Date.parse(k.createdAt), UPDATED_AT: (k) => Date.parse(updatedAt(k)) }, { field: "UPDATED_AT", direction: "DESC" });
       return page(ordered, args, (k) => ({ ...contactView(w, k), company: { id: k.companyId, name: companyName(k) }, insertedAt: k.createdAt, updatedAt: updatedAt(k) }));
     },

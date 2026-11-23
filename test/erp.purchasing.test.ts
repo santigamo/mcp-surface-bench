@@ -173,9 +173,12 @@ describe("create-purchase-payment", () => {
     expect(r.purchase).toEqual({ id: p1182.id, purchaseNumber: "PO-1182", paymentStatus: "PARTIALLY_PAID", paid: "3500.00", total: "6400.00" });
     expect(r.paymentDate).toBe("2026-11-23T10:00:00-08:00");
     expect(world.purchasePayments).toHaveLength(before.payments + 1);
-    expect(world.purchasePayments.at(-1)).toMatchObject({ id: r.id, purchaseId: p1182.id, amount: 2500, paymentMethodId: "pmm_2", voided: false });
+    expect(world.purchasePayments.at(-1)).toMatchObject({ id: r.id, paymentNumber: r.paymentNumber, purchaseId: p1182.id, amount: 2500, paymentMethodId: "pmm_2", recordedAt: "2026-11-23T10:00:00-08:00", voidedAt: null });
+    expect(r).toMatchObject({ insertedAt: "2026-11-23T10:00:00-08:00", updatedAt: "2026-11-23T10:00:00-08:00", voidedAt: null });
     expect(world.actions).toHaveLength(before.actions + 1);
-    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "PURCHASE_PAYMENT", id: r.id, op: "INSERT", rowLabel: "PO-1182" });
+    // A payment is a line of its purchase order, so it shows in the order's history and moves its updatedDate.
+    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "PURCHASE", id: p1182.id, name: "PO-1182", entity: "PURCHASE_PAYMENT", rowId: r.id, op: "INSERT", rowLabel: r.paymentNumber });
+    expect(call("get-purchase-order", { id: p1182.id }).purchaseOrder.updatedDate).toBe("2026-11-23T10:00:00-08:00");
     expect(call("get-purchase-payment", { id: r.id }).purchasePayment).toEqual(r);
     expect(call("get-purchase-order", { id: p1182.id }).purchaseOrder.paid).toBe("3500.00");
   });
@@ -184,6 +187,7 @@ describe("create-purchase-payment", () => {
     const { call, world } = bench();
     const r = call("create-purchase-payment", { purchaseId: po(world, "PO-1182").id, amount: 5500, paymentMethodId: "1", paymentDate: "2026-11-20T17:00:00Z" }).purchasePayment;
     expect(r.paymentDate).toBe("2026-11-20T09:00:00-08:00");
+    expect(r.insertedAt).toBe("2026-11-23T10:00:00-08:00"); // recorded now, paid three days ago
     expect(r.purchase.paymentStatus).toBe("OVER_PAID");
   });
 
@@ -212,7 +216,7 @@ describe("report-purchase-totals", () => {
     const r = call("report-purchase-totals", { rowsPer: "VENDOR", orderDatetime: { start: YEAR_START, end: TODAY } });
     const purchases = thisYear(world);
     expect(world.purchaseOrders.length - purchases.length).toBe(5);
-    expect(r.meta).toMatchObject({ report: "Purchase totals by vendor", dateRange: `${YEAR_START} to ${TODAY}`, totalRowCount: 6, truncated: false });
+    expect(r.meta).toMatchObject({ report: "Purchase totals by vendor", dateRange: `orderDatetime ${YEAR_START} to ${TODAY}`, totalRowCount: 6, truncated: false });
     expect(r.meta.columns.map((c: any) => c.key)).toContain("totalPurchases");
     for (const row of r.rows) {
       const theirs = purchases.filter((p) => p.vendorId === row.vendorId);
@@ -243,7 +247,7 @@ describe("report-purchase-totals", () => {
   test("defaults to the last 30 days", () => {
     const { call, world } = bench();
     const r = call("report-purchase-totals", { rowsPer: "VENDOR" });
-    expect(r.meta.dateRange).toBe("2026-10-25 to 2026-11-23");
+    expect(r.meta.dateRange).toBe("orderDatetime 2026-10-25 to 2026-11-23");
     const recent = world.purchaseOrders.filter((p) => p.orderDatetime.slice(0, 10) >= "2026-10-25");
     expect(sum(r.rows.map((x: any) => +x.totalPurchases)).toFixed(2)).toBe(sum(recent.map(purchaseTotal)).toFixed(2));
   });

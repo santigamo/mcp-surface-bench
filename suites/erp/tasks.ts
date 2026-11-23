@@ -4,8 +4,8 @@
 import { addDays, dayIn } from "../../src/core/kit.ts";
 import type { Check, Task } from "../../src/core/tool.ts";
 import {
-  amount, attributed, check, diff, firstMentioned, list, literal, mentions, mentionsAll, mentionsCount, mentionsNone, named, numbered, numbers,
-  onDay, passages, percentage, quotes, sentences, tagged, unchanged, unchangedExcept, valuesNear, weekday, weight, type Ref,
+  amount, attributed, check, diff, excuse, excused, firstMentioned, informative, list, literal, mentions, mentionsAll, mentionsCount, mentionsOf, named, namesNone, numbered,
+  numbers, onDay, percentage, quotes, sentences, tagged, unchanged, unchangedExcept, valuesNear, weekday, weight, type Ref,
 } from "./grading.ts";
 import { clock, lastMonth, quarter } from "./seed.ts";
 import {
@@ -63,6 +63,86 @@ const write = (id: string, source: string, prompt: string, grade: (run: { before
   id, source, prompt, kind: "write", grade,
 });
 
+// ---------- what excuses a wrong item ----------
+//
+// A negative check fails an answer that names a wrong item as part of its answer, and passes one that mentions it to
+// say why it is left out (see `namesNone` in grading.ts). Each excuse below is the task's statement of that: first
+// what counts as saying so explicitly, which works anywhere, even next to the right items; then the plain facts that
+// show it, which work only in a remark apart from them. Every check also takes "not included", "excluded" and the like.
+
+const IN_STOCK = excuse("that it is in stock",
+  ["in stock", "(?:is|are|still) available", "not sold out", "(?:has|have|with) (?:some |plenty of )?stock", "restocked", /sold out\W{1,3}(?:no|false)\b/],
+  [String.raw`[1-9][\d,]*(?:\.\d+)?\s*(?:units?\s+)?(?:available|on hand|in stock|left|remaining)`]);
+
+const ON_ANOTHER_MENU = (w: World, main: Menu | undefined) => {
+  const others = w.menus.filter((m) => m !== main).flatMap((m) => [named(m.name).pattern, named(m.externalName).pattern]);
+  return excuse("that it is on another menu",
+    ["(?:another|other|a different|different) menus?", /\b(?:not|isn't|aren't) (?:on|in) the main/, ...others.map((p) => new RegExp(`\\b(?:only|just) (?:on|in) (?:the )?(?:${p.source})`))],
+    others);
+};
+
+const ALREADY_IMPORTED = excuse("that it is already imported", ["imported", "already in (?:distru|inventory)", "has a distru package"]);
+
+const ON_ANOTHER_MANIFEST = (w: World, asked: string) => excuse("that it is on another manifest",
+  ["(?:another|other|a different|different|second|separate|outgoing) manifests?", /\b(?:not|isn't|aren't) on (?:this|that|the) manifest/],
+  w.metrcManifests.filter((m) => m.manifestNumber !== asked).flatMap((m) => [m.manifestNumber, m.manifestNumber.replace(/^0+/, "")]));
+
+const NOT_IN_VEG = excuse("that it has no plants in veg",
+  ["immature", "seedlings?", "clones?", "flowering", "in flower", "harvested", "mothers?", /(?:not|n't|none (?:are|is)|no plants?)\s+(?:yet\s+)?in (?:veg|the vegetative)/]);
+
+/** The other account's name, as words: not run together inside an email address, which names it too. */
+const OF_ACCOUNT = (name: string) => excuse(`that it is ${name}'s`, [new RegExp(`(?<![\\w@.])${name.split(/\s+/).join("\\s+")}(?![\\w@]|\\.\\w)`)]);
+
+const NOT_YET_DUE = excuse("that it is done or not yet due",
+  ["due (?:later )?today", "due tomorrow", String.raw`due in \d+ days?`, String.raw`due (?:next|later this|this coming) \w+`, "upcoming", "completed", "done", "finished",
+    /\b(?:not|n't) (?:yet )?(?:over)?due\b/, /\bnot (?:yet )?late\b/]);
+
+const SOMEONE_ELSES = (w: World) => {
+  const names = w.users.filter((u) => u.id !== w.me).flatMap((u) => [named(fullName(u)).pattern, named(u.firstName).pattern]);
+  return excuse("that it is another user's",
+    ["someone else(?:'s)?", "(?:a )?(?:colleague|teammate)(?:'s)?", "another (?:user|person|teammate)(?:'s)?", /\bnot (?:yours|assigned to you|mine)\b/,
+      ...names.map((p) => new RegExp(`\\b(?:assigned to|owned by|belongs to|for) (?:${p.source})`))],
+    names);
+};
+
+const ON_ANOTHER_DAY = (days: string[]) => excuse("that it happened on another day",
+  [/\bnot yesterday\b/, "(?:on )?(?:another|a different) day"],
+  [...days.map((d) => onDay(d, weekday(d)).pattern), "today", "this morning", "day before yesterday", "(?:two|2|three|3) days ago", "earlier (?:this|last) week"]);
+
+const BY_SOMEONE_ELSE = (w: World) => {
+  const names = w.users.flatMap((u) => [named(fullName(u)).pattern, named(u.firstName).pattern]);
+  return excuse("that a user changed it, not the public API",
+    [/\bnot (?:by|through|via|from) the (?:public )?API\b/, "(?:by|through|via|in|from) (?:the )?(?:web app|web|app|MCP|Distru)", "manually", "by hand", "(?:a|another) user",
+      ...names.map((p) => new RegExp(`\\b(?:by|from) (?:${p.source})`))],
+    [...names, "web app", "MCP"]);
+};
+
+const AT_OR_ABOVE_MINIMUM = excuse("that it is at or above its minimum, or has none",
+  ["no (?:minimum|min|low-stock alert|alert|threshold|reorder point)(?: set)?", "without (?:a )?(?:minimum|min|threshold|alert)", "has no min",
+    /\b(?:not|isn't|aren't) below\b/, "above (?:its |the )?(?:minimum|min|threshold)", "at (?:its |the )?(?:minimum|min|threshold)"]);
+
+const NOT_OVERDUE_ENOUGH = excuse("that it is 30 days overdue or less, paid or voided",
+  ["under (?:the )?(?:threshold|cutoff|cut-off|line|limit|30)", "(?:within|less than|fewer than|under|below|short of) (?:the )?(?:30|thirty)", "below the (?:threshold|cutoff|line)",
+    /\bnot (?:yet )?(?:more than|over|past|beyond) (?:30|thirty)\b/, /\b(?:not|n't) (?:yet )?(?:overdue|due)\b/, "(?:is|was|been|fully|now) paid", "paid (?:in full|off)", "voided", "void", "cancell?ed"]);
+
+const OUTSIDE_TOP_TEN = excuse("that it is outside the top ten",
+  [String.raw`(?:1[1-9]|[2-9]\d)(?:st|nd|rd|th)`, "eleventh|twelfth|thirteenth", String.raw`(?:#|no\.?\s*|number |rank(?:ed)? |place[d]? )1[1-9]`,
+    "outside (?:of )?the top", "(?:just )?missed", "below the top", "out of the top", /\b(?:not|didn't|doesn't|don't) (?:in|make|crack|reach|part of) the top/,
+    "cancell?ed", "(?:before|prior to|outside) the quarter", "(?:previous|prior|earlier) quarter"]);
+
+const PAID_IN_FULL = excuse("that it is paid in full",
+  ["paid in full", "fully paid", "over-?paid", "paid off", "settled", "nothing (?:left|owed|outstanding|due|remaining)", /\bnot underpaid\b/],
+  [String.raw`\$0(?:\.00)?\s*(?:left|remaining|outstanding|owed|due|balance)`, String.raw`balance of \$?0(?:\.00)?(?![\d.,])`]);
+
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+const OUTSIDE_LAST_MONTH = (month: { start: string; end: string }) => excuse("that it was harvested in another month",
+  [/\bnot (?:in )?last month\b/, /\boutside (?:of )?last month\b/],
+  ["this month", "today", "yesterday", "so far", "since then", "the month before", "two months ago", ...MONTH_NAMES.filter((_, i) => i + 1 !== +month.start.slice(5, 7)).map((m) => `(?:in |on )${m}`)]);
+
+/** A sentence that mentions the price only to say it is not what someone changed. */
+const NOT_THE_PRICE = /\b(?:not|n't|other than|except|besides|apart from|rather than) (?:change )?(?:the |its )?pric/i;
+
 // ---------- the facts each task depends on ----------
 
 const LAB_OPTIONS = ["SC Labs", "Steep Hill"];
@@ -95,12 +175,19 @@ function metrcImports(w: World) {
   return { unimported: w.metrcPackages.filter((p) => p.importStatus === "UNIMPORTED"), imported: w.metrcPackages.filter((p) => p.importStatus === "IMPORTED") };
 }
 
+/** The distinctive part of a Metrc error: what follows its preamble ("Metrc rejected the adjustment: ..."). */
+const reasonOf = (error: string) => error.slice(error.indexOf(": ") + 1).trim();
+
 function adjustments(w: World) {
   const yesterday = addDays(w.today, -1), dayBefore = addDays(w.today, -2);
-  const failedOn = (ymd: string) => w.metrcActivities
-    .filter((a) => a.type === "ADJUST_PACKAGE" && a.status === "FAILED" && dayOf(w, a.insertedAt) === ymd)
-    .map((a) => ({ label: w.packages.find((k) => k.id === a.packageId)?.metrcLabel, error: a.lastError ?? "" }));
-  return { yesterday, dayBefore, failed: failedOn(yesterday), earlier: failedOn(dayBefore) };
+  const label = (a: World["metrcActivities"][0]) => w.packages.find((k) => k.id === a.packageId)?.metrcLabel;
+  const ofYesterday = w.metrcActivities.filter((a) => a.type === "ADJUST_PACKAGE" && dayOf(w, a.insertedAt) === yesterday);
+  return {
+    yesterday, dayBefore,
+    failed: ofYesterday.filter((a) => a.status === "FAILED").map((a) => ({ label: label(a), reason: reasonOf(a.lastError ?? "") })),
+    queued: ofYesterday.filter((a) => a.status === "QUEUED").map((a) => ({ label: label(a) })),
+    dayBeforeFailures: w.metrcActivities.filter((a) => a.status === "FAILED" && dayOf(w, a.insertedAt) === dayBefore),
+  };
 }
 
 function manifest(w: World) {
@@ -140,7 +227,7 @@ function harvestsByStrain(w: World) {
     const inMonth = all.filter((h) => inRange(w, h.harvestedAt, month));
     return { strain, grams: sum(inMonth.map((h) => h.wetWeight)), harvested: inMonth.length > 0, outside: all.filter((h) => !inMonth.includes(h)).map((h) => h.wetWeight) };
   });
-  return { strains, harvested: rows.filter((r) => r.harvested), elsewhere: rows.filter((r) => !r.harvested && r.outside.length) };
+  return { month, strains, harvested: rows.filter((r) => r.harvested), elsewhere: rows.filter((r) => !r.harvested && r.outside.length) };
 }
 
 function account(w: World, name: string) {
@@ -168,7 +255,9 @@ function apiChanges(w: World) {
   const api = w.actions.filter((a) => a.source === "PUBLIC_API");
   const names = (actions: typeof api) => unique(actions.flatMap((a) => a.records.map((r) => r.name)));
   const touched = names(api.filter((a) => dayOf(w, a.changedAt) === yesterday));
-  return { yesterday: touched, otherDays: names(api.filter((a) => dayOf(w, a.changedAt) !== yesterday)).filter((n) => !touched.includes(n)) };
+  const others = api.filter((a) => dayOf(w, a.changedAt) !== yesterday);
+  const byUsers = names(w.actions.filter((a) => a.source !== "PUBLIC_API" && dayOf(w, a.changedAt) === yesterday)).filter((n) => !touched.includes(n));
+  return { yesterday: touched, otherDays: names(others).filter((n) => !touched.includes(n)), days: unique(others.map((a) => dayOf(w, a.changedAt))), byUsers };
 }
 
 function stockLevels(w: World) {
@@ -267,11 +356,11 @@ export const tasks: Task<World>[] = [
 
   // Commerce
   read("commerce-main-menu-sold-out", "mcp/commerce", "Which products on our main wholesale menu are sold out?", (answer, w) => {
-    const { out, inStock, elsewhere } = soldOut(w);
+    const { menu, out, inStock, elsewhere } = soldOut(w);
     return [
       mentionsAll("names every sold-out product on the main menu", answer, out.map(productRef)),
-      mentionsNone("names no product of the main menu that is in stock", answer, inStock.map(productRef)),
-      mentionsNone("names no product sold out only on another menu", answer, elsewhere.map(productRef)),
+      namesNone("names no product of the main menu that is in stock", answer, inStock.map(productRef), IN_STOCK, out.map(productRef)),
+      namesNone("names no product sold out only on another menu", answer, elsewhere.map(productRef), ON_ANOTHER_MENU(w, menu), out.map(productRef)),
     ];
   }),
 
@@ -303,22 +392,20 @@ export const tasks: Task<World>[] = [
     const { unimported, imported } = metrcImports(w);
     return [
       mentionsAll("identifies every unimported Metrc package, on both licenses", answer, unimported.map((p) => tagged(p.label))),
-      mentionsNone("names no package that is already imported", answer, imported.map((p) => tagged(p.label))),
+      namesNone("names no package that is already imported", answer, imported.map((p) => tagged(p.label)), ALREADY_IMPORTED, unimported.map((p) => tagged(p.label))),
     ];
   }),
 
   read("compliance-yesterday-adjustments", "mcp/compliance", "Did yesterday's Metrc adjustments all go through?", (answer, w) => {
-    const { yesterday, dayBefore, failed, earlier } = adjustments(w);
-    // Reporting the failure is what says "no": the package, or the words of its error, rather than the word "no".
-    const missed = failed.filter((f) => !(f.label && mentions(answer, tagged(f.label))) && !quotes(answer, f.error, earlier.map((e) => e.error)));
-    // The day before's failure may be mentioned, as long as the answer ties it to its own day.
-    const earlierRefs = earlier.flatMap((e) => (e.label ? [tagged(e.label)] : []));
-    const days = [onDay(yesterday, "yesterday", weekday(yesterday)), onDay(dayBefore, "day before yesterday", "two days ago", "2 days ago", weekday(dayBefore))];
-    const dated = attributed(answer, [...earlierRefs, ...failed.flatMap((f) => (f.label ? [tagged(f.label)] : []))], days);
-    const misdated = earlierRefs.filter((_, i) => dated[i]!.length && (!dated[i]!.includes(1) || dated[i]!.includes(0)));
+    const { failed, queued } = adjustments(w);
+    // Reporting the failure is what says "no": the package (in full or by its last five characters) or the words of its
+    // error after the preamble every Metrc rejection shares, rather than the word "no".
+    const missed = failed.filter((f) => !(f.label && mentions(answer, tagged(f.label))) && !quotes(answer, f.reason));
+    const unmentioned = queued.filter((q) => !(q.label && mentions(answer, tagged(q.label))));
     return [
-      check("reports yesterday's failed adjustment", missed.length === 0, missed.map((f) => `does not identify package ${f.label} or quote its error "${f.error}"`).join("; ")),
-      check("does not present the earlier failure as yesterday's", misdated.length === 0, `names package ${list(misdated.map((r) => r.label))} without dating it to ${dayBefore}`),
+      check("reports that one did not go through, identifying the failed adjustment", missed.length === 0,
+        missed.map((f) => `does not identify package ${f.label} or quote its error ("${f.reason}")`).join("; ")),
+      informative("mentions the adjustments still queued behind it", unmentioned.length === 0, `does not mention package ${list(unmentioned.map((q) => q.label ?? "?"))}`),
     ];
   }),
 
@@ -326,7 +413,7 @@ export const tasks: Task<World>[] = [
     const { asked, others } = manifest(w);
     return [
       mentionsAll("identifies every package on the manifest", answer, asked!.packages.map((p) => tagged(p.label))),
-      mentionsNone("names no package of another manifest", answer, others.map((p) => tagged(p.label))),
+      namesNone("names no package of another manifest", answer, others.map((p) => tagged(p.label)), ON_ANOTHER_MANIFEST(w, asked!.manifestNumber), asked!.packages.map((p) => tagged(p.label))),
     ];
   }),
 
@@ -362,23 +449,26 @@ export const tasks: Task<World>[] = [
     return [
       check("gives the plants in veg, by label or by group with their count", !unlisted.length || (!unnamed.length && counted),
         `${unlisted.length} of ${plants.length} plant labels missing; ${unnamed.length ? `groups missing: ${list(unnamed.map((g) => g.name))}` : "every group named"}; ${counted ? "count given" : `no count of ${plants.length}`}`),
-      mentionsNone("names no plant group without plants in veg", answer, others.map((g) => named(g.name))),
+      namesNone("names no plant group without plants in veg", answer, others.map((g) => named(g.name)), NOT_IN_VEG, [...groups.map((g) => named(g.name)), ...plants.map((p) => tagged(p.metrcLabel))]),
     ];
   }),
 
   read("cultivation-harvest-by-strain", "mcp/cultivation", "How much did we harvest last month, by strain?", (answer, w) => {
-    const { strains, harvested, elsewhere } = harvestsByStrain(w);
+    const { strains, harvested, elsewhere, month } = harvestsByStrain(w);
     const refs = strains.map((s) => named(s));
-    const near = passages(answer, refs);
-    // A strain harvested only in other months may be named, but not with the weight of those harvests.
+    const found = mentionsOf(answer, refs);
+    const other = OUTSIDE_LAST_MONTH(month);
+    const answerBlocks = new Set(found.filter((m) => harvested.some((h) => h.strain === refs[m.ref]!.label)).map((m) => m.block));
+    // A strain harvested only in other months may be named, and its weight given, when the context says so.
     const weighed = elsewhere.filter((r) => {
       const weights = [...r.outside, sum(r.outside)];
-      return near[strains.indexOf(r.strain)]!.flatMap(numbers).some((n) => weights.some((g) => weight(g, WEIGHT_SHARE)(n)));
+      return found.some((m, i) => refs[m.ref]!.label === r.strain && !excused(m, other, answerBlocks)
+        && numbers(answer.slice(m.end, found[i + 1]?.start ?? answer.length).split("\n")[0]! + " " + m.context).some((n) => weights.some((g) => weight(g, WEIGHT_SHARE)(n))));
     });
     return [
       valuesNear("gives each strain's wet weight harvested last month", answer,
         harvested.map((r) => ({ ref: named(r.strain), accepts: weight(r.grams, WEIGHT_SHARE), shows: `${r.grams} g` })), refs),
-      check("gives no weight for strains not harvested last month", weighed.length === 0, `gives a weight for ${list(weighed.map((r) => r.strain))}`),
+      check("gives no weight for strains not harvested last month", weighed.length === 0, `gives a weight for ${list(weighed.map((r) => r.strain))} without saying ${other.says}`),
     ];
   }),
 
@@ -388,7 +478,8 @@ export const tasks: Task<World>[] = [
     return [
       check("gives the sales rep of Sunset Dispensary", mentions(answer, named(asked.rep!)), `missing ${asked.rep}`),
       check("gives the email of its buyer", mentions(answer, literal(asked.buyer!)), `missing ${asked.buyer}`),
-      mentionsNone("gives neither the rep nor the buyer of Sunset Wellness Collective", answer, [named(other.rep!), literal(other.buyer!)]),
+      namesNone("gives neither the rep nor the buyer of Sunset Wellness Collective", answer, [named(other.rep!), literal(other.buyer!)], OF_ACCOUNT(other.company!.name),
+        [named(asked.rep!), literal(asked.buyer!)]),
     ];
   }),
 
@@ -396,8 +487,8 @@ export const tasks: Task<World>[] = [
     const { overdue, notOverdue, others } = myTasks(w);
     return [
       mentionsAll("names every overdue task of mine", answer, overdue.map(taskRef)),
-      mentionsNone("names none of my tasks that are done or not yet due", answer, notOverdue.map(taskRef)),
-      mentionsNone("names no task of another user", answer, others.map(taskRef)),
+      namesNone("names none of my tasks that are done or not yet due", answer, notOverdue.map(taskRef), NOT_YET_DUE, overdue.map(taskRef)),
+      namesNone("names no task of another user", answer, others.map(taskRef), SOMEONE_ELSES(w), overdue.map(taskRef)),
     ];
   }),
 
@@ -422,7 +513,7 @@ export const tasks: Task<World>[] = [
     const actors = [actor, ...others.map((n) => named(n))];
     const price = named("price", "priced", "pricing", "priceBase");
     // Other changes to the order may be listed; a sentence or row about the price must name its changer first.
-    const credited = sentences(answer).filter((s) => mentions(s, price)).map((s) => firstMentioned(s, actors)).filter((a) => a && a !== actor);
+    const credited = sentences(answer).filter((s) => mentions(s, price) && !NOT_THE_PRICE.test(s)).map((s) => firstMentioned(s, actors)).filter((a) => a && a !== actor);
     const day = dayOf(w, change!.changedAt);
     return [
       check("names who changed the price", mentions(answer, actor), `missing ${change!.actorName}`),
@@ -432,10 +523,11 @@ export const tasks: Task<World>[] = [
   }),
 
   read("history-public-api-yesterday", "mcp/history", "What did the public API change yesterday?", (answer, w) => {
-    const { yesterday, otherDays } = apiChanges(w);
+    const { yesterday, otherDays, days, byUsers } = apiChanges(w);
     return [
       mentionsAll("names every record the public API changed yesterday", answer, yesterday.map(recordRef)),
-      mentionsNone("names no record the public API changed on another day", answer, otherDays.map(recordRef)),
+      namesNone("names no record the public API changed on another day", answer, otherDays.map(recordRef), ON_ANOTHER_DAY(days), yesterday.map(recordRef)),
+      namesNone("names no record only users changed yesterday", answer, byUsers.map(recordRef), BY_SOMEONE_ELSE(w), yesterday.map(recordRef)),
     ];
   }),
 
@@ -444,7 +536,7 @@ export const tasks: Task<World>[] = [
     const { below, others } = stockLevels(w);
     return [
       mentionsAll("names every product below its minimum", answer, below.map(productRef)),
-      mentionsNone("names no product at or above its minimum, or without one", answer, others.map(productRef)),
+      namesNone("names no product at or above its minimum, or without one", answer, others.map(productRef), AT_OR_ABOVE_MINIMUM, below.map(productRef)),
     ];
   }),
 
@@ -490,15 +582,20 @@ export const tasks: Task<World>[] = [
     return [
       mentionsAll("lists every invoice more than 30 days overdue", answer, overdue.map(ref)),
       check("gives the sales rep of each", misattributed.length === 0, list(misattributed, 6)),
-      mentionsNone("lists no invoice overdue 30 days or less, paid or voided", answer, wrong.map(ref)),
+      namesNone("lists no invoice overdue 30 days or less, paid or voided", answer, wrong.map(ref), NOT_OVERDUE_ENOUGH, overdue.map(ref)),
     ];
   }),
 
   read("orders-top-customers", "mcp/orders", "Who were our top 10 customers by revenue last quarter?", (answer, w) => {
     const ranked = customerRanking(w);
+    const top = ranked.slice(0, 10).map((r) => named(r.company.name));
+    // The order of a ranking is worth measuring, but "who were our top 10" does not strictly ask for it.
+    const first = top.map((ref) => mentionsOf(answer, [ref])[0]?.start ?? -1);
+    const inOrder = first.every((at, i) => at >= 0 && (i === 0 || at > first[i - 1]!));
     return [
-      mentionsAll("names the ten customers with the most revenue last quarter", answer, ranked.slice(0, 10).map((r) => named(r.company.name))),
-      mentionsNone("names no customer outside the top ten", answer, ranked.slice(10).map((r) => named(r.company.name))),
+      mentionsAll("names the ten customers with the most revenue last quarter", answer, top),
+      namesNone("names no customer outside the top ten", answer, ranked.slice(10).map((r) => named(r.company.name)), OUTSIDE_TOP_TEN, top),
+      informative("names the ten in descending order of revenue", inOrder, `first named in this order: ${list(top.map((r, i) => ({ r, at: first[i]! })).filter((x) => x.at >= 0).sort((a, b) => a.at - b.at).map((x) => x.r.label), 10)}`),
     ];
   }),
 
@@ -527,7 +624,7 @@ export const tasks: Task<World>[] = [
     const { unpaid, paid } = purchasesUnpaid(w);
     return [
       mentionsAll("lists every purchase order not paid in full", answer, unpaid.map((po) => numbered(po.purchaseNumber))),
-      mentionsNone("lists no purchase order paid in full", answer, paid.map((po) => numbered(po.purchaseNumber))),
+      namesNone("lists no purchase order paid in full", answer, paid.map((po) => numbered(po.purchaseNumber)), PAID_IN_FULL, unpaid.map((po) => numbered(po.purchaseNumber))),
     ];
   }),
 
@@ -541,8 +638,8 @@ export const tasks: Task<World>[] = [
       check("records exactly one purchase payment", added.length === 1, `recorded ${added.length}`),
       check("the payment is $2,500", !!payment && Math.abs(payment.amount - 2500) < 0.005, payment ? `it is ${usd(payment.amount)}` : none),
       check("it is against PO-1182", payment?.purchaseId === po.id, payment ? `it is against ${number(payment.purchaseId)}` : none),
-      check("it is not voided and uses an existing payment method", !!payment && !payment.voided && before.paymentMethods.some((m) => m.id === payment.paymentMethodId),
-        payment ? `voided: ${payment.voided}, payment method: ${payment.paymentMethodId}` : none),
+      check("it is not voided and uses an existing payment method", !!payment && payment.voidedAt === null && before.paymentMethods.some((m) => m.id === payment.paymentMethodId),
+        payment ? `voided: ${payment.voidedAt !== null}, payment method: ${payment.paymentMethodId}` : none),
       unchangedExcept("changes nothing else", before, after, ["purchasePayments.+", ...LOG]),
     ];
   }),
@@ -600,10 +697,13 @@ export function preflight(w: World): string[] {
   none("compliance-unimported-packages", sameEnding(w.metrcPackages.map((p) => p.label)), "Metrc packages share their last five characters");
 
   const adj = adjustments(w);
-  need("compliance-yesterday-adjustments", adj.failed.length && adj.failed.every((f) => f.label), "no adjustment of a known package failed yesterday");
-  need("compliance-yesterday-adjustments", adj.earlier.length && adj.earlier.every((f) => f.label), "no adjustment of a known package failed the day before");
-  none("compliance-yesterday-adjustments", sameEnding([...adj.failed, ...adj.earlier].map((f) => f.label ?? "")), "failed packages share their last five characters");
-  need("compliance-yesterday-adjustments", adj.failed.every((f) => quotes(f.error, f.error, adj.earlier.map((e) => e.error))), "yesterday's error says nothing the day before's does not");
+  need("compliance-yesterday-adjustments", adj.failed.length === 1 && adj.failed[0]!.label, `${adj.failed.length} adjustments of known packages failed yesterday, not one`);
+  need("compliance-yesterday-adjustments", adj.failed.every((f) => quotes(f.reason, f.reason)), "the failure's error has no reason of four words or more");
+  need("compliance-yesterday-adjustments", adj.queued.length && adj.queued.every((q) => q.label), "no adjustment of yesterday is queued behind the failure");
+  need("compliance-yesterday-adjustments", !adj.dayBeforeFailures.length, "an activity of the day before yesterday failed");
+  none("compliance-yesterday-adjustments", w.licenses.filter((l) => w.metrcActivities.filter((a) => a.licenseId === l.id && a.status === "FAILED").length > 1).map((l) => l.licenseNumber),
+    "licenses with more than one FAILED activity, which the documentation rules out");
+  none("compliance-yesterday-adjustments", sameEnding([...adj.failed, ...adj.queued].map((f) => f.label ?? "")), "failed and queued packages share their last five characters");
 
   const man = manifest(w);
   need("compliance-manifest-packages", man.asked?.packages.length, "manifest 0001234567 is missing or empty");
@@ -648,6 +748,7 @@ export function preflight(w: World): string[] {
   const api = apiChanges(w);
   need("history-public-api-yesterday", api.yesterday.length, "the public API changed nothing yesterday");
   need("history-public-api-yesterday", api.otherDays.length, "the public API changed nothing on other days");
+  need("history-public-api-yesterday", api.byUsers.length, "no user changed a record yesterday that the public API did not");
 
   const stock = stockLevels(w);
   const highestMinimum = Math.max(...stock.below.map((p) => p.thresholdMin!));

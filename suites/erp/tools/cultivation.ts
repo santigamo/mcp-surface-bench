@@ -1,15 +1,13 @@
 // Plant groups, plants and harvests. The world keeps no teardowns, weighings, bins, costs or Metrc ids for
 // cultivation records: those fields are empty, and the filters on them are not offered.
-import { bound, matches, normalizeId, normalizeIds, page, qty, sorted, within, zoned, type SortBy } from "../../../src/core/kit.ts";
+import { bound, closeness, inList, inStatus, matches, normalizeId, normalizeIds, page, qty, ranked, sorted, within, zoned, type SortBy, type Status } from "../../../src/core/kit.ts";
 import { ToolError, defineTool } from "../../../src/core/tool.ts";
-import { PREFIX, type Harvest, type Id, type Plant, type PlantGroup, type World } from "../world.ts";
-import { find } from "./shared.ts";
+import { PREFIX, plantGroupActive, type Harvest, type Id, type Plant, type PlantGroup, type World } from "../world.ts";
+import { find, serial } from "./shared.ts";
 
 type Paging = { limit?: number; cursor?: string };
 
 const time = (iso: string) => Date.parse(iso);
-const serial = (id: Id) => Number(id.split("_")[1]);
-const inList = (list: readonly string[] | undefined, value: string) => !list || list.includes(value);
 const optionalId = (value: string | undefined, prefix: string) => (value === undefined ? undefined : normalizeId(value, prefix));
 
 const licenseOf = (w: World, id: Id) => find(w.licenses, id, "license");
@@ -67,28 +65,27 @@ function stageCounts(w: World, g: PlantGroup) {
 
 const groupUpdatedAt = (w: World, g: PlantGroup) => Math.max(time(g.plantedAt), ...plantsIn(w, g).map(plantUpdatedAt));
 
-/** The fields search-plant-groups and get-plant-group share. A group is active while it has immature plants, as the documentation defines it. */
+/** The fields search-plant-groups and get-plant-group share. */
 function plantGroupRow(w: World, g: PlantGroup, n = stageCounts(w, g)) {
   return {
     id: g.id, name: g.name, metrcStrainName: g.strainName, plantedAt: g.plantedAt, complianceType: licenseOf(w, g.licenseId).complianceType,
-    isActive: n.immature > 0, totalPlantsCount: n.total, immaturePlantsCount: n.immature,
+    isActive: plantGroupActive(w, g), totalPlantsCount: n.total, immaturePlantsCount: n.immature,
     license: licenseRef(w, g.licenseId), location: locationRef(w, g.locationId),
   };
 }
 
 type PlantGroupSearch = Paging & {
-  ids?: string[]; licenseIds?: string[]; locationIds?: string[]; metrcStrainNames?: string[]; status?: "ACTIVE" | "ANY" | "INACTIVE"; search?: string; sortBy?: SortBy;
+  ids?: string[]; licenseIds?: string[]; locationIds?: string[]; metrcStrainNames?: string[]; status?: Status; search?: string; sortBy?: SortBy;
 };
 
 function searchPlantGroups(args: PlantGroupSearch, w: World) {
   const ids = normalizeIds(args.ids, PREFIX.plantGroup), licenseIds = normalizeIds(args.licenseIds, PREFIX.license), locationIds = normalizeIds(args.locationIds, PREFIX.location);
-  const status = args.status ?? "ACTIVE";
-  return w.plantGroups.filter((g) => {
-    const active = stageCounts(w, g).immature > 0;
-    return inList(ids, g.id) && inList(licenseIds, g.licenseId) && inList(locationIds, g.locationId) && inList(args.metrcStrainNames, g.strainName)
-      && (status === "ANY" || active === (status === "ACTIVE")) && matches(args.search, g.name, g.strainName, find(w.locations, g.locationId, "location").name);
-  });
+  return w.plantGroups.filter((g) => inList(ids, g.id) && inList(licenseIds, g.licenseId) && inList(locationIds, g.locationId) && inList(args.metrcStrainNames, g.strainName)
+    && inStatus(args.status, plantGroupActive(w, g)));
 }
+
+/** How closely a plant group's name, strain or location resembles the search. */
+const groupCloseness = (w: World, term: string) => (g: PlantGroup) => closeness(term, [g.name, g.strainName, find(w.locations, g.locationId, "location").name]);
 
 // ---------- harvests ----------
 
@@ -129,7 +126,7 @@ function searchHarvests(args: HarvestSearch, w: World) {
   const finishedAfter = day(args.finishedAfter, "finishedAfter"), finishedBefore = day(args.finishedBefore, "finishedBefore");
   return w.harvests.filter((h) => inList(ids, h.id) && !excluded.includes(h.id) && (!licenseId || h.licenseId === licenseId) && inList(locationIds, h.locationId)
     && inList(args.metrcStrainNames, h.strainName) && (!args.distruStatus || h.status === args.distruStatus)
-    && within(h.harvestedAt, after, before) && dayWithin(h.finishedDate, finishedAfter, finishedBefore) && matches(args.search, h.name));
+    && within(h.harvestedAt, after, before) && dayWithin(h.finishedDate, finishedAfter, finishedBefore));
 }
 
 // ---------- tools ----------
@@ -173,11 +170,11 @@ export const tools = [
     name: "search-plant-groups",
     supports: ["limit", "cursor", "ids", "licenseIds", "locationIds", "metrcStrainNames", "status", "search", "sortBy"],
     run(args: PlantGroupSearch, { world: w }) {
-      let groups = searchPlantGroups(args, w);
-      // With `search` the documentation ranks by closeness and ignores sortBy; a substring match in stored order is the closest this world gets.
-      if (!args.search) {
-        groups = sorted(groups, args.sortBy, { NAME: (g) => g.name, PLANTED_AT: (g) => time(g.plantedAt), INSERTED_AT: (g) => serial(g.id), UPDATED_AT: (g) => groupUpdatedAt(w, g) }, { field: "UPDATED_AT", direction: "DESC" });
-      }
+      const found = searchPlantGroups(args, w);
+      // With search, closeness ranks and sortBy is ignored.
+      const groups = args.search
+        ? ranked(found, groupCloseness(w, args.search))
+        : sorted(found, args.sortBy, { NAME: (g) => g.name, PLANTED_AT: (g) => time(g.plantedAt), INSERTED_AT: (g) => serial(g.id), UPDATED_AT: (g) => groupUpdatedAt(w, g) }, { field: "UPDATED_AT", direction: "DESC" });
       return page(groups, args, (g) => plantGroupRow(w, g));
     },
   }),
@@ -210,7 +207,8 @@ export const tools = [
     supports: ["limit", "cursor", "ids", "licenseId", "locationIds", "metrcStrainNames", "harvestedAfter", "harvestedBefore", "finishedAfter", "finishedBefore", "search", "distruStatus", "excludeIds", "sortBy"],
     run(args: HarvestSearch, { world: w }) {
       let harvests = searchHarvests(args, w);
-      // With `search` and no sortBy the documentation ranks by name similarity; a substring match in stored order is the closest this world gets.
+      // With search, name similarity ranks; an explicit sortBy ranks first and similarity breaks its ties (the sort is stable).
+      if (args.search) harvests = ranked(harvests, (h) => closeness(args.search!, [h.name]));
       if (!args.search || args.sortBy) {
         harvests = sorted(harvests, args.sortBy, { NAME: (h) => h.name, HARVESTED_AT: (h) => time(h.harvestedAt), INSERTED_AT: (h) => serial(h.id), UPDATED_AT: (h) => harvestUpdatedAt(w, h) }, { field: "UPDATED_AT", direction: "DESC" });
       }

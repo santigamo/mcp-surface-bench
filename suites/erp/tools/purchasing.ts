@@ -1,15 +1,18 @@
 // Purchase orders, the payments made against them, and the purchasing reports.
-import { addDays, bound, dayIn, instant, isoIn, money, normalizeId, normalizeIds, page, qty, report, sorted, within, type SortBy } from "../../../src/core/kit.ts";
+import {
+  bound, closeness, dayIn, describeRanges, inList, instant, isoIn, lastDays, like, matches, money, normalizeId, normalizeIds, page, qty, ranked, report, sorted, within,
+  type DateSpan as Range, type SortBy,
+} from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
-import { newId, PREFIX, purchaseMoney, type Id, type PurchaseOrder, type PurchasePayment, type World } from "../world.ts";
-import { closeness, customFieldValues, lastChanged, ranked } from "./directory.ts";
-import { find, named, recordAction, stamp, userRef, type C } from "./shared.ts";
+import { lastChanged, newId, paymentUpdatedAt, PREFIX, purchaseMoney, type Id, type PurchaseOrder, type PurchasePayment, type World } from "../world.ts";
+import { customFieldValues, find, named, productFilter, recordAction, recordUrl, reportCustomFields, serial, stamp, userName, userRef, type C } from "./shared.ts";
 
-type Range = { start?: string; end?: string };
 type Between = { min?: number; max?: number };
 
 const supplierOf = (w: World, po: PurchaseOrder) => named(w.companies, po.vendorId);
-const isIn = (ids: Id[] | undefined, id: Id | null) => !ids || (id !== null && ids.includes(id));
+/** A purchase order changes with its payments too: when one is recorded or voided. */
+const purchaseUpdated = (w: World, po: PurchaseOrder) =>
+  lastChanged(w, "PURCHASE", po.id, po.orderDatetime, ...w.purchasePayments.filter((p) => p.purchaseId === po.id).map(paymentUpdatedAt));
 const between = (n: number, r: Between | undefined) => !r || ((r.min === undefined || n >= r.min) && (r.max === undefined || n <= r.max));
 
 /** A dollar input sent as a string or a number. */
@@ -27,8 +30,8 @@ function purchaseSummary(w: World, po: PurchaseOrder) {
     id: po.id, customFields: customFieldValues(w, "PURCHASE_ORDER"), purchaseNumber: po.purchaseNumber, status: po.status, color: null, paymentStatus: status,
     // The world's purchases carry no charges, discounts or taxes.
     total: money(total), totalCharges: money(0),
-    orderDate: po.orderDatetime, dueDate: po.dueDatetime, createdDate: po.orderDatetime, updatedDate: lastChanged(w, "PURCHASE", po.id, po.orderDatetime),
-    url: `https://app.distru.com/purchases/${po.id.split("_")[1]}`, qbBillId: null, qbSyncStatus: null, supplier: supplierOf(w, po), owner: userRef(w, po.ownerId),
+    orderDate: po.orderDatetime, dueDate: po.dueDatetime, createdDate: po.orderDatetime, updatedDate: purchaseUpdated(w, po),
+    url: recordUrl("purchaseOrder", po.id), qbBillId: null, qbSyncStatus: null, supplier: supplierOf(w, po), owner: userRef(w, po.ownerId),
     // Purchases are never matched to a compliance transfer in this world.
     complianceManifestNumber: null,
   };
@@ -60,28 +63,24 @@ function searchPurchases(w: World, args: PurchaseSearch) {
   const total = { min: args.totalGreaterThanOrEqualTo, max: args.totalLessThanOrEqualTo };
   const hits = w.purchaseOrders.filter((po) =>
     (args.status ? args.status.includes(po.status) : po.status !== "DRAFT") &&
-    isIn(ids, po.id) && isIn(supplierIds, po.vendorId) && isIn(ownerIds, po.ownerId) &&
+    inList(ids, po.id) && inList(supplierIds, po.vendorId) && inList(ownerIds, po.ownerId) &&
     (!productIds || po.items.some((i) => productIds.includes(i.productId))) &&
     (!args.paymentStatus || args.paymentStatus.includes(purchaseMoney(w, po).status)) &&
     within(po.orderDatetime, ...ordered) && within(po.dueDatetime, ...due) && between(purchaseMoney(w, po).total, total));
-  if (args.search) return ranked(hits, args.search, (po) => closeness(args.search!, [po.purchaseNumber]));
+  if (args.search) return ranked(hits, (po) => closeness(args.search!, [po.purchaseNumber]));
   return sorted(hits, args.sortBy, {
     DUE_DATE: (po) => Date.parse(po.dueDatetime), INSERTED_AT: (po) => Date.parse(po.orderDatetime), ORDER_DATE: (po) => Date.parse(po.orderDatetime),
-    PURCHASE_NUMBER: (po) => po.purchaseNumber, UPDATED_AT: (po) => Date.parse(lastChanged(w, "PURCHASE", po.id, po.orderDatetime)),
+    PURCHASE_NUMBER: (po) => po.purchaseNumber, UPDATED_AT: (po) => Date.parse(purchaseUpdated(w, po)),
   }, { field: "UPDATED_AT", direction: "DESC" });
 }
 
 // ---------- purchase payments ----------
 
-// Payments carry no number of their own in the world; the number is made from the id.
-const paymentNumber = (p: PurchasePayment) => `PMT-${p.id.split("_")[1]}`;
-
 /** A payment as get-purchase-order lists it. */
 const paymentView = (w: World, p: PurchasePayment) => ({
-  id: p.id, paymentNumber: paymentNumber(p), paymentDate: p.paymentDatetime, status: p.voided ? ("VOIDED" as const) : ("POSTED" as const),
-  // The world records neither when a payment was entered nor when it was voided; both read as its payment date.
-  voidedAt: p.voided ? p.paymentDatetime : null, amount: money(p.amount), paymentMethod: named(w.paymentMethods, p.paymentMethodId), note: p.note,
-  qbPaymentAccount: null, qbBillPaymentId: null, qbSyncStatus: null, insertedAt: p.paymentDatetime, updatedAt: p.paymentDatetime,
+  id: p.id, paymentNumber: p.paymentNumber, paymentDate: p.paymentDatetime, status: p.voidedAt ? ("VOIDED" as const) : ("POSTED" as const),
+  voidedAt: p.voidedAt, amount: money(p.amount), paymentMethod: named(w.paymentMethods, p.paymentMethodId), note: p.note,
+  qbPaymentAccount: null, qbBillPaymentId: null, qbSyncStatus: null, insertedAt: p.recordedAt, updatedAt: paymentUpdatedAt(p),
 });
 
 /** A payment as the payment tools return it: with its purchase's balance and supplier. */
@@ -89,12 +88,6 @@ function paymentWithPurchase(w: World, p: PurchasePayment) {
   const po = find(w.purchaseOrders, p.purchaseId, "purchase order");
   const { total, paid, status } = purchaseMoney(w, po);
   return { ...paymentView(w, p), purchase: { id: po.id, purchaseNumber: po.purchaseNumber, paymentStatus: status, paid: money(paid), total: money(total) }, supplier: supplierOf(w, po) };
-}
-
-/** `search` on payments: a substring where % matches any run of characters and _ any one character. */
-function like(term: string, ...fields: (string | null)[]): boolean {
-  const pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("%", ".*").replaceAll("_", "."), "i");
-  return fields.some((f) => f !== null && pattern.test(f));
 }
 
 type PaymentSearch = {
@@ -110,18 +103,19 @@ function searchPayments(w: World, args: PaymentSearch) {
   const status = args.status ?? "POSTED";
   const searched = (p: PurchasePayment, po: PurchaseOrder) => {
     const supplier = supplierOf(w, po)?.name ?? null;
-    return like(args.search!, paymentNumber(p), p.note, po.purchaseNumber, supplier) || closeness(args.search!, [], [supplier]) !== undefined;
+    return like(args.search!, p.paymentNumber, p.note, po.purchaseNumber, supplier) || closeness(args.search!, [], [supplier]) !== undefined;
   };
   const hits = w.purchasePayments.filter((p) => {
     const po = find(w.purchaseOrders, p.purchaseId, "purchase order");
-    return (status === "ALL" || (status === "VOIDED") === p.voided) &&
-      isIn(methodIds, p.paymentMethodId) && isIn(purchaseIds, po.id) && isIn(supplierIds, po.vendorId) &&
+    return (status === "ALL" || (status === "VOIDED") === (p.voidedAt !== null)) &&
+      inList(methodIds, p.paymentMethodId) && inList(purchaseIds, po.id) && inList(supplierIds, po.vendorId) &&
       between(p.amount, amount) && within(p.paymentDatetime, after, before) &&
-      (args.paymentNumber === undefined || paymentNumber(p).toLowerCase().includes(args.paymentNumber.toLowerCase())) &&
+      matches(args.paymentNumber, p.paymentNumber) &&
       (args.search === undefined || searched(p, po));
   });
+  // search keeps the sortBy order.
   return sorted(hits, args.sortBy, {
-    PAYMENT_DATE: (p) => Date.parse(p.paymentDatetime), INSERTED_AT: (p) => Date.parse(p.paymentDatetime), UPDATED_AT: (p) => Date.parse(p.paymentDatetime), PAYMENT_NUMBER: paymentNumber,
+    PAYMENT_DATE: (p) => Date.parse(p.paymentDatetime), INSERTED_AT: (p) => Date.parse(p.recordedAt), UPDATED_AT: (p) => Date.parse(paymentUpdatedAt(p)), PAYMENT_NUMBER: (p) => p.paymentNumber,
   }, { field: "PAYMENT_DATE", direction: "DESC" });
 }
 
@@ -138,11 +132,15 @@ function createPayment(c: C, args: NewPayment) {
   if (args.qbPaymentAccount !== undefined) throw new ToolError("qbPaymentAccount is rejected: this company is not connected to QuickBooks. Leave it out to record the payment with no account.");
   const paymentDatetime = args.paymentDate === undefined ? stamp(c) : isoIn(w.timezone, instant(args.paymentDate));
 
-  const payment: PurchasePayment = { id: newId(w, PREFIX.purchasePayment), purchaseId: po.id, amount, paymentDatetime, paymentMethodId: method.id, note: args.note?.trim() || null, voided: false };
+  const id = newId(w, PREFIX.purchasePayment);
+  const payment: PurchasePayment = {
+    id, paymentNumber: `PMT-${serial(id)}`, purchaseId: po.id, amount, paymentDatetime, recordedAt: stamp(c), paymentMethodId: method.id, note: args.note?.trim() || null, voidedAt: null,
+  };
   w.purchasePayments.push(payment);
   const field = (name: string, label: string, value: string | null) => ({ field: name, label, oldValue: null, newValue: value });
+  // A payment is a line of its purchase order, so it shows in the order's history.
   recordAction(c, [{
-    type: "PURCHASE_PAYMENT", id: payment.id, name: paymentNumber(payment), op: "INSERT", rowLabel: po.purchaseNumber,
+    type: "PURCHASE", id: po.id, name: po.purchaseNumber, entity: "PURCHASE_PAYMENT", rowId: payment.id, op: "INSERT", rowLabel: payment.paymentNumber,
     fields: [field("amount", "Amount", money(amount)), field("paymentMethodId", "Payment method", method.name), field("paymentDatetime", "Payment date", paymentDatetime), field("note", "Note", payment.note)],
   }]);
   return { purchasePayment: paymentWithPurchase(w, payment) };
@@ -150,24 +148,11 @@ function createPayment(c: C, args: NewPayment) {
 
 // ---------- reports ----------
 
-const LAST_DAYS = 30;
-const MAX_REPORT_ROWS = 5000;
-
-/** A report's order-date range: the one sent, else the last 30 days through today. `label` is what meta.dateRange prints. */
-function reportRange(w: World, sent: Range | undefined, defaulted: boolean) {
-  const r = sent ?? (defaulted ? { start: addDays(w.today, 1 - LAST_DAYS), end: w.today } : {});
-  return { after: bound(r.start, "after", w.timezone), before: bound(r.end, "before", w.timezone), label: `${r.start ?? "the first record"} to ${r.end ?? "now"}` };
-}
-
-/** Report paging with the documented ceiling on rows per page. */
-function reportPage<R>(info: { report: string; dateRange: string; columns: { key: string; label: string }[] }, rows: R[], args: { maxRowsLimit?: number; cursor?: string }) {
-  if ((args.maxRowsLimit ?? 0) > MAX_REPORT_ROWS) throw new ToolError(`maxRowsLimit can be at most ${MAX_REPORT_ROWS}.`);
-  return report(info, rows, args);
-}
+/** A date range as the filter bounds it checks. */
+const bounds = (w: World, r: Range | undefined) => ({ after: bound(r?.start, "after", w.timezone), before: bound(r?.end, "before", w.timezone) });
 
 /** meta.columns for a report: every row key but customFields, each with its label. */
 const columns = (labels: Record<string, string>) => Object.entries(labels).map(([key, label]) => ({ key, label }));
-const reportCustomFields = (w: World, entityType: string) => customFieldValues(w, entityType).map((f) => ({ key: f.customField.id, label: f.customField.name, value: f.value }));
 
 /** M/D/YYYY in the company timezone. */
 function shortDate(w: World, iso: string): string {
@@ -193,7 +178,7 @@ function totalsByVendor(w: World, purchases: PurchaseOrder[], args: TotalsArgs) 
   const groupIds = normalizeIds(args.vendorGroupIds, PREFIX.companyGroup);
   const counted = w.purchaseOrders.filter((po) => po.status !== "DRAFT");
   return w.companies
-    .filter((v) => isIn(groupIds, v.groupId))
+    .filter((v) => inList(groupIds, v.groupId))
     .map((v) => ({ v, mine: purchases.filter((po) => po.vendorId === v.id) }))
     .filter(({ mine }) => mine.length)
     .map(({ v, mine }) => {
@@ -203,7 +188,7 @@ function totalsByVendor(w: World, purchases: PurchaseOrder[], args: TotalsArgs) 
         spend,
         row: {
           name: v.name, vendorId: v.id, lastPurchaseDate: shortDate(w, latest), purchaseOrderCount: String(mine.length), totalPurchases: money(spend),
-          productOwner: userRef(w, v.ownerId)?.profile.fullName ?? null, vendorOwnerId: v.ownerId, category: null,
+          productOwner: userName(w, v.ownerId), vendorOwnerId: v.ownerId, category: null,
           relationshipType: v.relationship === "VENDOR" ? "Vendor" : "Customer", customFields: reportCustomFields(w, "COMPANY"),
         },
       };
@@ -216,18 +201,14 @@ const PRODUCT_COLUMNS = columns({
 });
 
 function totalsByProduct(w: World, purchases: PurchaseOrder[], args: TotalsArgs) {
-  const filter = {
-    categoryId: normalizeIds(args.productCategoryIds, PREFIX.category), subcategoryId: normalizeIds(args.productSubcategoryIds, PREFIX.subcategory), vendorId: normalizeIds(args.vendorIds, PREFIX.company),
-    brandId: normalizeIds(args.brandIds, PREFIX.company), groupId: normalizeIds(args.productGroupIds, PREFIX.group),
-  };
-  const tagIds = normalizeIds(args.productTagIds, PREFIX.tag);
+  const ofKind = productFilter(w, args);
   const bought = new Map<Id, { quantity: number; spend: number }>();
   for (const i of purchases.flatMap((po) => po.items)) {
     const sum = bought.get(i.productId) ?? { quantity: 0, spend: 0 };
     bought.set(i.productId, { quantity: sum.quantity + i.quantity, spend: sum.spend + i.quantity * i.unitCost });
   }
   return w.products
-    .filter((p) => bought.has(p.id) && (Object.keys(filter) as (keyof typeof filter)[]).every((k) => isIn(filter[k], p[k])) && (!tagIds || p.tagIds.some((t) => tagIds.includes(t))))
+    .filter((p) => bought.has(p.id) && ofKind(p))
     .map((p) => {
       const { quantity, spend } = bought.get(p.id)!;
       const category = find(w.categories, p.categoryId, "category");
@@ -248,12 +229,12 @@ function totalsByProduct(w: World, purchases: PurchaseOrder[], args: TotalsArgs)
 function purchaseTotals(w: World, args: TotalsArgs) {
   const wrong = args.rowsPer === "VENDOR" ? PRODUCT_ONLY.filter((k) => args[k] !== undefined) : args.vendorGroupIds !== undefined ? ["vendorGroupIds"] : [];
   if (wrong.length) throw new ToolError(`${wrong.join(", ")} ${wrong.length > 1 ? "apply" : "applies"} only when rowsPer is ${args.rowsPer === "VENDOR" ? "PRODUCT" : "VENDOR"}.`);
-  const range = reportRange(w, args.orderDatetime, true);
+  const ordered = args.orderDatetime ?? lastDays(w.today), range = bounds(w, ordered);
   const ownerIds = normalizeIds(args.ownerIds, PREFIX.user), locationIds = normalizeIds(args.locationIds, PREFIX.location);
-  const purchases = w.purchaseOrders.filter((po) => po.status !== "DRAFT" && within(po.orderDatetime, range.after, range.before) && isIn(ownerIds, po.ownerId) && isIn(locationIds, po.locationId));
+  const purchases = w.purchaseOrders.filter((po) => po.status !== "DRAFT" && within(po.orderDatetime, range.after, range.before) && inList(ownerIds, po.ownerId) && inList(locationIds, po.locationId));
   const byVendor = args.rowsPer === "VENDOR";
   const rows = (byVendor ? totalsByVendor(w, purchases, args) : totalsByProduct(w, purchases, args)).sort((a, b) => b.spend - a.spend || a.row.name.localeCompare(b.row.name)).map((x) => x.row);
-  return reportPage({ report: byVendor ? "Purchase totals by vendor" : "Purchase totals by product", dateRange: range.label, columns: byVendor ? VENDOR_COLUMNS : PRODUCT_COLUMNS }, rows, args);
+  return report({ report: byVendor ? "Purchase totals by vendor" : "Purchase totals by product", dateRange: describeRanges([["orderDatetime", ordered]]), columns: byVendor ? VENDOR_COLUMNS : PRODUCT_COLUMNS }, rows, args);
 }
 
 type HistoryArgs = {
@@ -267,20 +248,20 @@ const HISTORY_COLUMNS = columns({
 });
 
 function purchaseHistory(w: World, args: HistoryArgs) {
-  const ordered = reportRange(w, args.orderDatetime, args.dueDatetime === undefined);
-  const due = reportRange(w, args.dueDatetime, false);
+  const orderedSpan = args.orderDatetime ?? (args.dueDatetime === undefined ? lastDays(w.today) : undefined);
+  const ordered = bounds(w, orderedSpan), due = bounds(w, args.dueDatetime);
   const locationIds = normalizeIds(args.locationIds, PREFIX.location), productIds = normalizeIds(args.productIds, PREFIX.product), vendorIds = normalizeIds(args.vendorIds, PREFIX.company);
   const hits = w.purchaseOrders.filter((po) => {
     const { total, paid } = purchaseMoney(w, po);
     return po.status !== "DRAFT" && (!args.statuses || args.statuses.includes(po.status)) &&
       within(po.orderDatetime, ordered.after, ordered.before) && within(po.dueDatetime, due.after, due.before) &&
-      isIn(locationIds, po.locationId) && isIn(vendorIds, po.vendorId) && (!productIds || po.items.some((i) => productIds.includes(i.productId))) &&
+      inList(locationIds, po.locationId) && inList(vendorIds, po.vendorId) && (!productIds || po.items.some((i) => productIds.includes(i.productId))) &&
       between(total, args.total) && between(paid, args.paid);
   });
   // Without a search the report lists the latest purchases first.
-  const rows = args.search ? ranked(hits, args.search, (po) => closeness(args.search!, [po.purchaseNumber])) : sorted(hits, undefined, { ORDER_DATE: (po) => Date.parse(po.orderDatetime) }, { field: "ORDER_DATE", direction: "DESC" });
-  const dateRange = args.orderDatetime || !args.dueDatetime ? ordered.label : `due ${due.label}`;
-  return reportPage({ report: "Purchase order history", dateRange, columns: HISTORY_COLUMNS }, rows.map((po) => historyRow(w, po)), args);
+  const rows = args.search ? ranked(hits, (po) => closeness(args.search!, [po.purchaseNumber])) : sorted(hits, undefined, { ORDER_DATE: (po) => Date.parse(po.orderDatetime) }, { field: "ORDER_DATE", direction: "DESC" });
+  const dateRange = describeRanges([["orderDatetime", orderedSpan], ["dueDatetime", args.dueDatetime]]);
+  return report({ report: "Purchase order history", dateRange, columns: HISTORY_COLUMNS }, rows.map((po) => historyRow(w, po)), args);
 }
 
 function historyRow(w: World, po: PurchaseOrder) {
@@ -288,7 +269,7 @@ function historyRow(w: World, po: PurchaseOrder) {
   const supplier = supplierOf(w, po)!;
   return {
     purchaseDate: wallClock(po.orderDatetime), dueDate: wallClock(po.dueDatetime), purchaseNumber: po.purchaseNumber, purchaseOrderId: po.id, vendor: supplier.name, vendorId: supplier.id,
-    status: po.status, paid: money(paid), amount: money(total), owner: userRef(w, po.ownerId)?.profile.fullName ?? null, purchaseOrderOwnerId: po.ownerId, customFields: reportCustomFields(w, "PURCHASE_ORDER"),
+    status: po.status, paid: money(paid), amount: money(total), owner: userName(w, po.ownerId), purchaseOrderOwnerId: po.ownerId, customFields: reportCustomFields(w, "PURCHASE_ORDER"),
   };
 }
 
@@ -311,7 +292,7 @@ export const tools = [
       const po = w.purchaseOrders.find((p) => p.id === normalizeId(args.id, PREFIX.purchaseOrder));
       if (!po) return { purchaseOrder: null };
       const location = named(w.locations, po.locationId);
-      const payments = w.purchasePayments.filter((p) => p.purchaseId === po.id && !p.voided).sort((a, b) => Date.parse(a.paymentDatetime) - Date.parse(b.paymentDatetime));
+      const payments = w.purchasePayments.filter((p) => p.purchaseId === po.id && p.voidedAt === null).sort((a, b) => Date.parse(a.paymentDatetime) - Date.parse(b.paymentDatetime));
       return {
         purchaseOrder: {
           ...purchaseSummary(w, po), paid: money(purchaseMoney(w, po).paid), description: null,

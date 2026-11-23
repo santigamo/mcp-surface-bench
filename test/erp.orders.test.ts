@@ -246,11 +246,10 @@ describe("invoice payments", () => {
 
   test("a voided payment is left out by default and kept as recorded", () => {
     const { call, world: w } = bench();
-    w.invoicePayments[0]!.voided = true;
+    w.invoicePayments[0]!.voidedAt = "2026-11-22T16:00:00-08:00";
     expect(call("search-invoice-payments").totalCount).toBe(88);
     const voided = call("search-invoice-payments", { status: "VOIDED" }).items[0];
-    expect(voided).toMatchObject({ id: w.invoicePayments[0]!.id, status: "VOIDED", appliedAmount: money(w.invoicePayments[0]!.amount) });
-    expect(voided.voidedAt).not.toBeNull();
+    expect(voided).toMatchObject({ id: w.invoicePayments[0]!.id, status: "VOIDED", appliedAmount: money(w.invoicePayments[0]!.amount), voidedAt: "2026-11-22T16:00:00-08:00", updatedAt: "2026-11-22T16:00:00-08:00" });
   });
 
   test("get-invoice-payment, a missing id and a purchase payment's id", () => {

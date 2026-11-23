@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-  amount, attributed, diff, firstMentioned, literal, mentions, mentionsCount, named, numbered, numbers, onDay, passages, percentage, quotes,
-  sentences, tagged, unchanged, unchangedExcept, valuesNear, weekday, weight,
+  amount, attributed, diff, excuse, firstMentioned, literal, mentions, mentionsCount, named, namesNone, numbered, numbers, onDay, passages, percentage,
+  placeOf, quotes, sentences, tagged, unchanged, unchangedExcept, valuesNear, weekday, weight,
 } from "../suites/erp/grading.ts";
 
 const said = (text: string, accepts: (n: ReturnType<typeof numbers>[0]) => boolean) => numbers(text).some(accepts);
@@ -207,5 +207,45 @@ describe("world changes", () => {
   test("unchanged passes only on an identical world", () => {
     expect(unchanged(before, structuredClone(before))).toEqual({ name: "leaves the world unchanged", pass: true });
     expect(unchanged(before, { ...before, actions: [1] }).pass).toBe(false);
+  });
+});
+
+describe("the context of a mention", () => {
+  const at = (answer: string, word: string) => placeOf(answer, answer.indexOf(word));
+
+  test("a table row is read with its column headers", () => {
+    expect(at("| Product | Status |\n| --- | --- |\n| Blue Dream 7g | In stock |", "Blue Dream").context).toBe("Product: Blue Dream 7g | Status: In stock");
+  });
+  test("a list item is read with the line that introduces its list", () => {
+    const answer = "**Sold out**\n- Gelato 3.5g\n\n**In stock, but low**\n- Blue Dream 7g: 65";
+    expect(at(answer, "Blue Dream")).toMatchObject({ own: "- Blue Dream 7g: 65", context: "- Blue Dream 7g: 65 | **In stock, but low**" });
+    expect(at(answer, "Blue Dream").block).not.toBe(at(answer, "Gelato").block);
+  });
+  test("prose is read clause by clause, following a clause that goes on about the same thing", () => {
+    expect(at("Gelato 3.5g is sold out, while the rest are in stock.", "Gelato").context).toBe("Gelato 3.5g is sold out");
+    expect(at("Jack Herer 14g is sold out, but it is only on the Spring Menu.", "Jack").context).toBe("Jack Herer 14g is sold out but it is only on the Spring Menu.");
+    expect(at("Jack Herer 14g is sold out, but only on the Spring Menu.", "Jack").context).toBe("Jack Herer 14g is sold out but only on the Spring Menu.");
+    expect(at("Wedding Cake 7g changed. Blue Dream 7g did not.", "Blue").context).toBe("Blue Dream 7g did not.");
+  });
+});
+
+describe("negative checks", () => {
+  const inStock = excuse("that it is in stock", ["in stock"], [String.raw`[1-9]\d*\s*available`]);
+  const names = (answer: string) => namesNone("names no product in stock", answer, [named("Blue Dream 7g")], inStock, [named("Gelato 3.5g")]).pass;
+
+  test("a statement excuses a mention, unless it is negated or denied", () => {
+    expect(names("Gelato 3.5g is sold out. Blue Dream 7g is in stock.")).toBe(true);
+    expect(names("Gelato 3.5g is sold out. Blue Dream 7g is not in stock.")).toBe(false);
+    expect(names("Gelato 3.5g is sold out. Blue Dream 7g is no longer in stock.")).toBe(false);
+    expect(names("| Product | In stock |\n| --- | --- |\n| Gelato 3.5g | No |\n| Blue Dream 7g | No |")).toBe(false);
+    expect(names("| Product | In stock |\n| --- | --- |\n| Gelato 3.5g | No |\n| Blue Dream 7g | Yes |")).toBe(true);
+  });
+  test("a fact excuses a mention only outside the part of the answer that gives it", () => {
+    expect(names("Gelato 3.5g is sold out. Blue Dream 7g has 65 available.")).toBe(true);
+    expect(names("Sold out:\n- Gelato 3.5g\n- Blue Dream 7g (65 available)")).toBe(false);
+    expect(names("Sold out: Gelato 3.5g and Blue Dream 7g (65 available).")).toBe(false);
+  });
+  test("every check takes a plain statement that the item is left out", () => {
+    expect(names("Sold out:\n- Gelato 3.5g\n- Blue Dream 7g (not included: it was restocked)")).toBe(true);
   });
 });

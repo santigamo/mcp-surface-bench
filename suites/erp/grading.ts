@@ -159,6 +159,159 @@ export function quotes(text: string, source: string, others: string[] = [], n = 
   return [...runs(source)].some((r) => !shared.has(r) && said.includes(` ${r} `));
 }
 
+// ---------- the context of a mention ----------
+
+const LIST_ITEM = /^(\s*)(?:[-*+•]|\d+[.)])\s+/;
+const TABLE_ROW = /^\s*\|/;
+const TABLE_RULE = /^\s*\|?\s*:?-{2,}/;
+/** Clause breaks inside a sentence: a semicolon, a dash, or a comma before a contrasting conjunction. */
+const CLAUSE_BREAK = /;\s*|\s+[—–]\s+|\s+--\s+|,\s+(?=(?:but|while|whereas|though|although|yet|however)\b)/gi;
+const SENTENCE_BREAK = /(?<=[.!?])\s+(?=\S)/g;
+/**
+ * A clause or sentence that goes on speaking about what the one before it named: it opens with a pronoun ("but it is
+ * only on the Spring Menu"), or with "but" and no subject of its own ("but only on the Spring Menu", "but by users").
+ */
+const CONTINUES = new RegExp([
+  String.raw`^\s*(?:(?:but|and|while|though|although|yet|so|however|whereas)[,\s]+)?(?:it|its|it's|they|their|they're|that|which|this|these|those|both|each|neither|all of them|none of them)\b`,
+  String.raw`^\s*(?:but|though|although|yet)[,\s]+(?:only|just|not|also|still|already|by|on|in|at|through|via|from|for|with|under|over|after|before|since)\b`,
+].join("|"), "i");
+
+/** The pieces of `text` between the matches of `breaks`, with where each starts. */
+function pieces(text: string, breaks: RegExp): { start: number; text: string }[] {
+  const out: { start: number; text: string }[] = [];
+  let at = 0;
+  for (const m of text.matchAll(breaks)) {
+    out.push({ start: at, text: text.slice(at, m.index) });
+    at = m.index + m[0].length;
+  }
+  out.push({ start: at, text: text.slice(at) });
+  return out;
+}
+
+const clausesOf = (line: string) => pieces(line, SENTENCE_BREAK).flatMap((sentence) => pieces(sentence.text, CLAUSE_BREAK).map((c) => ({ start: sentence.start + c.start, text: c.text })));
+
+const cells = (row: string) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
+/**
+ * Where a mention sits in an answer: the block it belongs to (a table, a list, or one clause of prose), and the text
+ * that speaks about it, its context:
+ * - in a table row, the row, each cell read with its column header ("Imported: Yes");
+ * - in a list item, the clause of the item, and the line that introduces the list (a heading, "Still in stock:");
+ * - in prose, the clause of the sentence, and the clauses after it on the same line that go on about it (`CONTINUES`).
+ * `own` is the context without the introducing line: what the item or row says about itself.
+ */
+export function placeOf(answer: string, at: number): { block: string; context: string; own: string } {
+  const lines = answer.split("\n");
+  const starts = lines.map((_, i) => lines.slice(0, i).reduce((n, l) => n + l.length + 1, 0));
+  const row = Math.max(0, starts.findLastIndex((s) => s <= at));
+  const line = lines[row]!, column = at - starts[row]!;
+  if (TABLE_ROW.test(line)) {
+    let top = row;
+    while (top > 0 && TABLE_ROW.test(lines[top - 1]!)) top--;
+    const header = top + 1 < lines.length && TABLE_RULE.test(lines[top + 1]!) && top !== row ? cells(lines[top]!) : [];
+    const context = cells(line).map((c, i) => (header[i] ? `${header[i]}: ${c}` : c)).join(" | ");
+    return { block: `table ${top}`, context, own: context };
+  }
+  const item = LIST_ITEM.exec(line);
+  if (item) {
+    const indent = item[1]!.length;
+    // The list runs up through items (blank lines between them included) to the line that introduces it.
+    let up = row - 1;
+    for (; up >= 0; up--) {
+      const above = lines[up]!;
+      if (!above.trim()) continue;
+      const nested = LIST_ITEM.exec(above);
+      if (!nested || nested[1]!.length < indent) break;
+    }
+    const own = clauseText(line, column);
+    return { block: `list ${up}`, context: up >= 0 ? `${own} | ${lines[up]}` : own, own };
+  }
+  const clauses = clausesOf(line);
+  const i = clauses.findLastIndex((c) => c.start <= column);
+  const own = clauseText(line, column);
+  return { block: `clause ${row}.${i}`, context: own, own };
+}
+
+/** The clause of a line holding position `at`, with the clauses and sentences after it that go on about the same thing. */
+function clauseText(line: string, at: number): string {
+  const clauses = clausesOf(line);
+  const i = clauses.findLastIndex((c) => c.start <= at);
+  const kept = [clauses[i]!.text];
+  for (const next of clauses.slice(i + 1)) {
+    if (!CONTINUES.test(next.text)) break;
+    kept.push(next.text);
+  }
+  return kept.join(" ");
+}
+
+// ---------- what excuses a mention ----------
+
+/**
+ * Words that turn a statement around, or make it a prospect rather than a fact, when they come just before it:
+ * "not imported", "hasn't been paid in full", "waiting to be imported".
+ */
+const NEGATED = String.raw`(?<!\b(?:not|never|no longer|hardly|isn't|aren't|wasn't|weren't|hasn't|haven't|doesn't|don't|didn't|won't|cannot|can't|to|can|could|should|must|will|would|may|might)\s+(?:(?:yet|been|be|really|fully|quite|actually|currently|even)\s+){0,2})`;
+/** A value that says the opposite when a column or label is followed by it: "In stock: No", "Imported? 0". */
+const DENIED = String.raw`(?!\W{0,3}(?:no|none|false|n/a|0(?![.,\d]))(?![\w.]))`;
+
+/**
+ * What lets an answer mention a wrong item without naming it as part of its answer, in the task's terms: `says` is
+ * the statement ("it is in stock"). `states` are explicit statements that the item is not part of the answer
+ * ("in stock", "overpaid", "outside the top ten"); `facts` are plain facts that show it (65 available, $0 left), which
+ * excuse a mention only outside the part of the answer that gives the answer.
+ */
+export type Excuse = { says: string; states: RegExp; facts: RegExp | null };
+
+/** Plain statements that an item is not part of the answer, which excuse a mention on every task. */
+const LEFT_OUT = [
+  String.raw`(?:\bnot|n't) (?:included|counted|listed|part of)`,
+  String.raw`(?:does|do|did)(?:n't| not) (?:count|qualify|belong)`, String.raw`excluded`, String.raw`left (?:it |them )?out`, String.raw`not (?:on|in) (?:this|the|that) list`,
+].map((p) => new RegExp(p));
+
+/** A string is a statement that counts only when not negated just before it nor denied just after it; a RegExp is taken as written. */
+type Phrase = string | RegExp;
+const union = (phrases: Phrase[]) =>
+  new RegExp(phrases.map((p) => `(?:${typeof p === "string" ? `${NEGATED}(?<![\\w'])(?:${p})(?![\\w'])${DENIED}` : p.source})`).join("|"), "i");
+
+/**
+ * An excuse made of phrases. A string phrase counts only when it is not negated just before it and not denied just
+ * after it ("in stock", but not "not in stock" or "In stock: No"); a RegExp is taken as written, for a statement that
+ * is itself a negation ("not overdue") or a name.
+ */
+export function excuse(says: string, states: Phrase[], facts: Phrase[] = []): Excuse {
+  return { says, states: union([...states, ...LEFT_OUT]), facts: facts.length ? union(facts) : null };
+}
+
+/** A mention of a ref: where it is in the answer and what the text around it says. */
+export type Mention = { ref: number; start: number; end: number; block: string; context: string; own: string };
+
+/** Every mention of `refs` in an answer, with its place. Curly apostrophes read as straight ones. */
+export function mentionsOf(answer: string, refs: Ref[]): Mention[] {
+  const text = answer.replaceAll("’", "'");
+  return spans(text, refs).map((s) => ({ ...s, ...placeOf(text, s.start) }));
+}
+
+/**
+ * Whether a mention is excused. In a block that names a right item too (`answerBlocks`), that is the table, list or
+ * clause that gives the answer, only an explicit statement on the item's own row or item excuses it. Anywhere else
+ * a statement or a plain fact does, read with the line introducing its list.
+ */
+export function excused(m: Mention, why: Excuse, answerBlocks: Set<string> = new Set()): boolean {
+  if (answerBlocks.has(m.block)) return why.states.test(m.own);
+  return why.states.test(m.context) || !!why.facts?.test(m.context);
+}
+
+/**
+ * The negative check: the answer names none of `refs` as part of its answer. A ref counts as named when the answer
+ * mentions it at least once without excusing it (see `excused`); `right` are the items the answer should give,
+ * which mark the part of the answer that gives it.
+ */
+export function namesNone(name: string, answer: string, refs: Ref[], unless: Excuse, right: Ref[] = []): Check {
+  const blocks = new Set(mentionsOf(answer, right).map((m) => m.block));
+  const named = [...new Set(mentionsOf(answer, refs).filter((m) => !excused(m, unless, blocks)).map((m) => refs[m.ref]!.label))];
+  return check(name, named.length === 0, `names ${list(named)} without saying ${unless.says}`);
+}
+
 // ---------- numbers ----------
 
 export type Num = { value: number; text: string; percent: boolean; currency: boolean; unit: "" | "g" | "kg" | "lb" };
@@ -206,17 +359,15 @@ export const mentionsCount = (text: string, n: number) =>
 /** A check whose `detail`, saying what was wrong, is kept only when it fails. */
 export const check = (name: string, pass: boolean, detail?: string): Check => ({ name, pass, ...(detail && !pass ? { detail } : {}) });
 
+/** A check that is reported but does not decide the run: a quality worth measuring that the request did not strictly ask for. */
+export const informative = (name: string, pass: boolean, detail?: string): Check => ({ ...check(name, pass, detail), required: false });
+
 export const list = (items: string[], most = 8, separator = ", ") =>
   items.length > most ? `${items.slice(0, most).join(separator)} and ${items.length - most} more` : items.join(separator);
 
 export function mentionsAll(name: string, answer: string, refs: Ref[]): Check {
   const missing = refs.filter((r) => !mentions(answer, r)).map((r) => r.label);
   return check(name, missing.length === 0, `missing: ${list(missing)}`);
-}
-
-export function mentionsNone(name: string, answer: string, refs: Ref[]): Check {
-  const found = refs.filter((r) => mentions(answer, r)).map((r) => r.label);
-  return check(name, found.length === 0, `mentions: ${list(found)}`);
 }
 
 export type Expected = { ref: Ref; accepts: (n: Num) => boolean; /** The expected value, as the detail shows it. */ shows: string };

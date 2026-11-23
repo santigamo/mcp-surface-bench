@@ -121,7 +121,8 @@ test("search-packages filters by stock, status, place and product", () => {
   expect(typeof row.metrcId).toBe("number");
 
   const vault = locationId(w, "Vault");
-  expect(call("search-packages", { locationIds: [vault], licenseIds: ["lic_1"] }).totalCount).toBe(live.length);
+  expect(call("search-packages", { locationIds: [vault], licenseIds: ["lic_1"] }).totalCount).toBe(live.filter((k) => k.locationId === vault).length);
+  expect(call("search-packages", { licenseIds: ["lic_2"] }).items.map((k: any) => k.product.name)).toEqual(["Gelato Bulk Flower"]);
   expect(call("search-packages", { locationIds: [locationId(w, "Shipping Room")] }).totalCount).toBe(0);
   expect(call("search-packages", { productIds: [productId(w, "Blue Dream 7g")] }).totalCount).toBe(2);
   const concentrates = w.categories[4]!;
@@ -130,14 +131,15 @@ test("search-packages filters by stock, status, place and product", () => {
   expect(call("search-packages", { labTestingStates: ["NOT_TESTED"] }).totalCount).toBe(0);
   expect(call("search-packages", { labTestingStates: ["PASSED"] }).totalCount).toBe(live.length);
 
-  const queued = w.metrcActivities.filter((a) => a.status === "QUEUED").map((a) => a.packageId);
-  expect(ids(call("search-packages", { syncing: true }))).toEqual(queued as string[]);
-  expect(call("search-packages", { syncing: false }).totalCount).toBe(live.length - queued.length);
+  // A package is syncing while a change of it is not in Metrc yet: queued, or failed and holding the queue back.
+  const pending = [...new Set(w.metrcActivities.filter((a) => a.status !== "COMPLETED").map((a) => a.packageId!))];
+  expect(ids(call("search-packages", { syncing: true })).sort()).toEqual(pending.sort());
+  expect(call("search-packages", { syncing: false }).totalCount).toBe(live.length - pending.length);
 
   const byQuantity = call("search-packages", { sortBy: { field: "QUANTITY", direction: "DESC" }, limit: 100 }).items.map((k: any) => +k.quantity);
   expect(byQuantity).toEqual([...byQuantity].sort((a, b) => b - a));
   expect(call("search-packages", { sortBy: { field: "COMPLIANCE_LABEL", direction: "ASC" } }).items[0].metrcLabel).toBe([...live.map((k) => k.metrcLabel)].sort()[0]);
-  expect(call("search-packages", { sortBy: { field: "INSERTED_AT", direction: "ASC" } }).items[0].id).toBe(live.at(-1)!.id);
+  expect(call("search-packages", { sortBy: { field: "INSERTED_AT", direction: "ASC" } }).items[0].id).toBe([...live].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))[0]!.id);
   expect(all(call, "search-packages", { limit: 6 })).toHaveLength(live.length);
   expect(error("search-packages", { sortBy: { field: "EXPIRATION_DATE", direction: "ASC" } })).toContain("tool_error");
   expect(error("search-packages", { isTestSample: true })).toContain("unsupported_input");
@@ -172,9 +174,15 @@ test("move-stock moves 20 units of Blue Dream 3.5g from the vault to the shippin
 
   expect(w.batches[0]!.stock).toEqual([{ locationId: "loc_1", quantity: 40 }, { locationId: "loc_2", quantity: 30 }]);
   expect(activeQuantity(w, w.products[0]!)).toBe(70);
-  expect(w.stockTransfers).toEqual([{ id: "stt_1", number: "ST-1", fromLocationId: "loc_1", toLocationId: "loc_2", items: [{ productId: "prd_1", batchId: "bat_1", quantity: 20 }], description: "Restock shipping", transferDatetime: "2026-11-23T10:00:00-08:00" }]);
+  expect(w.stockTransfers).toEqual([{
+    id: "stt_1", number: "ST-1", fromLocationId: "loc_1", toLocationId: "loc_2", items: [{ productId: "prd_1", batchId: "bat_1", quantity: 20 }], description: "Restock shipping",
+    transferDatetime: "2026-11-23T10:00:00-08:00", completedAt: "2026-11-23T10:00:00-08:00",
+  }]);
   expect(w.actions).toHaveLength(actions + 1);
-  expect(w.actions.at(-1)).toMatchObject({ source: "MCP", actorName: "Maya Okafor", records: [{ type: "STOCK_TRANSFER", id: "stt_1", op: "INSERT" }] });
+  expect(w.actions.at(-1)).toMatchObject({
+    source: "MCP", actorName: "Maya Okafor",
+    records: [{ type: "STOCK_TRANSFER", id: "stt_1", entity: "STOCK_TRANSFER", rowId: "stt_1", op: "INSERT" }, { type: "STOCK_TRANSFER", id: "stt_1", entity: "STOCK_TRANSFER_ITEM", rowId: null, rowLabel: "Blue Dream 3.5g", op: "INSERT" }],
+  });
   expect(call("get-batch", { id: "bat_1", includeActiveQuantitiesByLocation: true }).batch.activeQuantitiesByLocation.map((r: any) => r.quantity)).toEqual(["40", "30"]);
 });
 
@@ -232,7 +240,10 @@ test("search-stock-transfers finds transfers by place, line, date and number", (
   expect(call("search-stock-transfers", { packageIds: ["pkg_1"] }).totalCount).toBe(0);
   expect(ids(call("search-stock-transfers", { transferDatetimeAfter: "2026-11-02" }))).toEqual(["stt_2"]);
   expect(ids(call("search-stock-transfers", { transferDatetimeBefore: "2026-11-01" }))).toEqual(["stt_1"]);
-  expect(ids(call("search-stock-transfers", { completedAtAfter: "2026-11-23T00:00:00-08:00", completedAtBefore: "2026-11-23" }))).toEqual(["stt_2"]);
+  // A transfer shows the date it was given, and completes when it is recorded.
+  expect(ids(call("search-stock-transfers", { completedAtAfter: "2026-11-23T00:00:00-08:00", completedAtBefore: "2026-11-23" }))).toEqual(["stt_2", "stt_1"]);
+  expect(call("search-stock-transfers", { ids: ["stt_1"] }).items[0]).toMatchObject({ transferDatetime: "2026-11-01T08:00:00-08:00", completedAt: "2026-11-23T10:00:00-08:00" });
+  expect(call("search-stock-transfers", { completedAtBefore: "2026-11-22" }).totalCount).toBe(0);
   expect(ids(call("search-stock-transfers", { sortBy: { field: "INITIATED_AT", direction: "ASC" } }))).toEqual(["stt_1", "stt_2"]);
   for (const field of ["COMPLETED_AT", "INSERTED_AT", "STOCK_TRANSFER_NUMBER", "UPDATED_AT"]) expect(ids(call("search-stock-transfers", { sortBy: { field, direction: "ASC" } }))).toEqual(["stt_1", "stt_2"]);
   const first = call("search-stock-transfers", { limit: 1 });
@@ -271,4 +282,43 @@ test("report-inventory-assets has a row per holding that adds up to each product
   expect([...page1.rows, ...page2.rows]).toEqual(full.rows);
   expect(error("report-inventory-assets", { snapshotDatetime: "2026-01-01T00:00:00-08:00" })).toContain("unsupported_input");
   expect(error("report-inventory-assets", { maxRowsLimit: 0 })).toContain("tool_error");
+});
+
+test("a package-tracked product's packages come from its batch, which holds no stock of its own", () => {
+  const { call, world: w } = bench();
+  const bd7 = w.products.find((p) => p.name === "Blue Dream 7g")!;
+  const lot = w.batches.find((b) => b.productId === bd7.id)!;
+  expect(lot.stock).toEqual([]);
+  const packages = call("search-packages", { productIds: [bd7.id] }).items;
+  expect(packages.every((k: any) => k.batch.id === lot.id && k.batch.name === lot.batchNumber)).toBe(true);
+  // The batch's quantity is its active packages', and the product's stock is still counted once, from the packages.
+  expect(call("get-batch", { id: lot.id, includeActiveQuantitiesByLocation: true }).batch).toMatchObject({
+    quantity: String(activeQuantity(w, bd7)), activeQuantitiesByLocation: [{ location: { name: "Vault" }, quantity: String(activeQuantity(w, bd7)) }],
+  });
+  expect(call("search-products", { ids: [bd7.id] }).items[0].quantityActive).toBe(String(activeQuantity(w, bd7)));
+  // search-batches lists batch-tracked products' batches only, as its page says; Blue Dream 3.5g keeps its batch.
+  expect(call("search-batches", { productIds: [bd7.id] }).totalCount).toBe(0);
+  expect(call("search-batches", { search: "Blue Dream 3.5g" }).items[0]).toMatchObject({ id: "bat_1", batchNumber: "LOT-2200" });
+  const rows = call("report-inventory-assets", { maxRowsLimit: 5000 }).rows.filter((r: any) => r.productId === bd7.id);
+  expect(rows.every((r: any) => r.batchId === lot.id && r.packageId !== null)).toBe(true);
+});
+
+test("reports refuse more rows per page than the documented 5,000", () => {
+  const { call, error } = bench();
+  for (const tool of ["report-inventory-assets", "report-inventory-valuation", "report-cogs"]) {
+    expect(error(tool, { maxRowsLimit: 5001 })).toBe("tool_error: maxRowsLimit must be between 1 and 5000.");
+    expect(call(tool, { maxRowsLimit: 5000 }).meta.rowLimit).toBe(5000);
+  }
+});
+
+test("search ranks by similarity where the page says so, and finds a typo where it promises a fuzzy match", () => {
+  const { call } = bench();
+  const names = (tool: string, args: Record<string, unknown>) => call(tool, args).items.map((x: any) => x.name ?? x.product?.name);
+  // search-packages: label matches first, then product name or SKU, the name also within a typo.
+  expect(names("search-packages", { search: "blue dreem 7g" })).toEqual(["Blue Dream 7g", "Blue Dream 7g"]);
+  // search-locations: name similarity, the shortest name holding the term first.
+  expect(names("search-locations", { search: "room" })).toEqual(["Veg Room", "Dry Room", "Shipping Room", "Flower Room A", "Processing Room"]);
+  // search-batches matches the batch number or the product, a substring only.
+  expect(call("search-batches", { search: "LOT-2200" }).items.map((b: any) => b.id)).toEqual(["bat_1"]);
+  expect(call("search-batches", { search: "blu dream" }).totalCount).toBe(0);
 });

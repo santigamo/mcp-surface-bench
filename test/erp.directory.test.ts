@@ -170,7 +170,8 @@ describe("mutate-company-contact", () => {
     expect(world.contacts).toHaveLength(before.contacts + 1);
     expect(world.contacts.at(-1)).toEqual({ id: "con_32", companyId: sunset.id, firstName: "Jane", lastName: "Lee", title: "Purchasing Manager", email: null, phone: null, ownerId: null, createdAt: NOW });
     expect(world.actions).toHaveLength(before.actions + 1);
-    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "CONTACT", id: "con_32", name: "Jane Lee", op: "INSERT" });
+    // A contact is a line of its company, so the change shows in the company's history.
+    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "COMPANY", id: sunset.id, name: "Sunset Dispensary", entity: "CONTACT", rowId: "con_32", rowLabel: "Jane Lee", op: "INSERT" });
     expect(world.actions.at(-1)!.records[0]!.fields.map((f) => f.field)).toEqual(["firstName", "lastName", "title"]);
     const listed = call("get-company", { id: sunset.id, includeContacts: true }).company.contacts.map((k: any) => k.firstName);
     expect(listed).toEqual(["Marcus", "Dana", "Jane"]);
@@ -198,7 +199,7 @@ describe("mutate-company-contact", () => {
     const { call, world } = bench();
     expect(call("mutate-company-contact", { action: "DELETE", id: "con_15" })).toEqual({ id: "con_15" });
     expect(world.contacts.find((k) => k.id === "con_15")).toBeUndefined();
-    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "CONTACT", id: "con_15", op: "DELETE" });
+    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "COMPANY", entity: "CONTACT", rowId: "con_15", op: "DELETE" });
   });
 
   test("refuses what its page requires, and leaves the world untouched", () => {

@@ -30,11 +30,16 @@ const task = (id: string) => {
   return found;
 };
 
-/** The names of the checks that fail, once each failure is shown to say why. */
+/** The names of the required checks that fail, once each failure is shown to say why. */
 function failures(id: string, answer: string, after: World = W): string[] {
   const checks = task(id).grade({ answer, before: W, after });
   for (const c of checks) if (!c.pass) expect(c.detail, `"${c.name}" fails without a detail`).toBeTruthy();
-  return checks.filter((c) => !c.pass).map((c) => c.name);
+  return checks.filter((c) => !c.pass && c.required !== false).map((c) => c.name);
+}
+
+/** The names of the informative checks (reported, not deciding the run) that fail. */
+function notes(id: string, answer: string): string[] {
+  return task(id).grade({ answer, before: W, after: W }).filter((c) => !c.pass && c.required === false).map((c) => c.name);
 }
 
 /** A copy of the world after a write: `change` edits it, and the write is logged the way the tools log one. */
@@ -72,19 +77,22 @@ describe("the task list", () => {
 describe("preflight", () => {
   test("is clean today", () => expect(preflight(W)).toEqual([]));
 
-  // On these days the seed gives two vendors this year's totals less than 1% apart, so the vendor-spend task
-  // could not tell them apart. That is the seed's limit, reported here rather than hidden by a looser check.
-  const VENDOR_CLASH = /^purchasing-vendor-spend: vendor totals too close to tell apart: /;
-  const vendorClashDays = new Set(["2026-02-20", "2026-03-05", "2026-05-05", "2026-05-20", "2026-06-05", "2026-08-20", "2026-11-20", "2026-12-05"]);
-  const spread = Array.from({ length: 12 }, (_, m) => ["05", "20"].map((d) => `2026-${String(m + 1).padStart(2, "0")}-${d}`)).flat();
+  // The one degenerate stretch: in a year's first 20 days the seed places no regular purchase orders (their payments
+  // would fall after today), so "this year" holds at most two vendors' and the vendor-spend task has nothing to rank.
+  // Every other day of 2026 and 2027 grades all 25 tasks.
+  const EARLY_JANUARY = "purchasing-vendor-spend: fewer than three vendors have purchase orders this year";
+  const degenerate = (date: string) => date.slice(5, 7) === "01" && +date.slice(8) <= 20;
+  const days: string[] = [];
+  for (let d = "2026-01-01"; d <= "2027-12-31"; d = addDays(d, 1)) days.push(d);
 
-  test.each(spread)("on %s", (date) => {
-    const problems = preflight(createWorld(date));
-    if (vendorClashDays.has(date)) {
-      expect(problems).toHaveLength(1);
-      expect(problems[0]).toMatch(VENDOR_CLASH);
-    } else expect(problems).toEqual([]);
-  });
+  test("on every day of 2026 and 2027", () => {
+    const unexpected = days.flatMap((date) => {
+      const problems = preflight(createWorld(date));
+      const expected = degenerate(date) ? [EARLY_JANUARY] : [];
+      return JSON.stringify(problems) === JSON.stringify(expected) ? [] : [`${date}: ${problems.join("; ") || "clean, but expected to be degenerate"}`];
+    });
+    expect(unexpected).toEqual([]);
+  }, 60_000);
 
   test("reports what makes a world ungradable", () => {
     const w = structuredClone(W);
@@ -201,23 +209,28 @@ describe("compliance-unimported-packages", () => {
 
 describe("compliance-yesterday-adjustments", () => {
   const id = "compliance-yesterday-adjustments";
-  const failedOn = (ymd: string) => W.metrcActivities.find((a) => a.type === "ADJUST_PACKAGE" && a.status === "FAILED" && day(a.insertedAt) === ymd)!;
+  const yesterday = addDays(TODAY, -1);
+  const adjustments = W.metrcActivities.filter((a) => a.type === "ADJUST_PACKAGE" && day(a.insertedAt) === yesterday);
+  const failed = adjustments.find((a) => a.status === "FAILED")!, queued = adjustments.filter((a) => a.status === "QUEUED");
   const label = (a: World["metrcActivities"][0]) => W.packages.find((k) => k.id === a.packageId)!.metrcLabel;
-  const [yesterday, dayBefore] = [addDays(TODAY, -1), addDays(TODAY, -2)];
-  const failed = failedOn(yesterday), earlier = failedOn(dayBefore);
   const reason = failed.lastError!.split(": ")[1]!;
 
+  test("the seed: one failed in the afternoon, and at least one queued behind it", () => {
+    expect(adjustments.filter((a) => a.status === "FAILED")).toHaveLength(1);
+    expect(queued.length).toBeGreaterThan(0);
+    expect(queued.every((q) => q.insertedAt > failed.insertedAt)).toBe(true);
+  });
   test("naming the failed package passes", () => expect(failures(id, `No. One of yesterday's adjustments failed: package ${label(failed)}. Metrc said: ${failed.lastError}`)).toEqual([]));
+  test("its last five characters pass", () => expect(failures(id, `Not all: the adjustment of package …${label(failed).slice(-5)} failed.`)).toEqual([]));
   test("quoting its error passes", () => expect(failures(id, `Not all of them: one was rejected because ${reason}`)).toEqual([]));
-  test("mentioning the earlier failure under its own day passes", () => {
-    expect(failures(id, bullets([`${yesterday}: package ${label(failed).slice(-5)} failed`, `${dayBefore}: package ${label(earlier).slice(-5)} failed too, but that was the day before`]))).toEqual([]);
+  test("saying they all went through", () => expect(failures(id, "Yes, all of yesterday's adjustments went through.")).toEqual(["reports that one did not go through, identifying the failed adjustment"]));
+  test("only the preamble every Metrc rejection shares does not identify it", () => {
+    expect(failures(id, "No: Metrc rejected the adjustment.")).toEqual(["reports that one did not go through, identifying the failed adjustment"]);
   });
-  test("saying they all went through", () => expect(failures(id, "Yes, all of yesterday's adjustments went through.")).toEqual(["reports yesterday's failed adjustment"]));
-  test("giving the earlier failure as yesterday's", () => {
-    expect(failures(id, `No: package ${label(earlier)} failed yesterday.`)).toEqual(["reports yesterday's failed adjustment", "does not present the earlier failure as yesterday's"]);
-  });
-  test("giving both failures as yesterday's", () => {
-    expect(failures(id, `No. Yesterday packages ${label(failed)} and ${label(earlier)} both failed.`)).toEqual(["does not present the earlier failure as yesterday's"]);
+  test("mentioning the queued ones is reported, not required", () => {
+    const answer = `No. The adjustment of package ${label(failed)} failed`;
+    expect(notes(id, `${answer}.`)).toEqual(["mentions the adjustments still queued behind it"]);
+    expect(notes(id, `${answer}, and ${queued.map((q) => label(q).slice(-5)).join(" and ")} are queued behind it.`)).toEqual([]);
   });
 });
 
@@ -403,7 +416,7 @@ describe("inventory-move-blue-dream", () => {
     const batch = w.batches.find((b) => b.productId === blueDream.id)!;
     batch.stock.find((s) => s.locationId === from)!.quantity -= quantity;
     if (to) batch.stock.find((s) => s.locationId === to)!.quantity += quantity;
-    if (transfer) w.stockTransfers.push({ id: newId(w, "stt"), number: "ST-1", fromLocationId: from, toLocationId: to, items: [{ productId: blueDream.id, batchId: batch.id, quantity }], description: null, transferDatetime: new Date(NOW).toISOString() });
+    if (transfer) w.stockTransfers.push({ id: newId(w, "stt"), number: "ST-1", fromLocationId: from, toLocationId: to, items: [{ productId: blueDream.id, batchId: batch.id, quantity }], description: null, transferDatetime: new Date(NOW).toISOString(), completedAt: new Date(NOW).toISOString() });
   });
 
   test("a transfer of 20 from the vault to shipping passes", () => expect(failures(id, "", move(vault.id, shipping.id, 20))).toEqual([]));
@@ -416,7 +429,7 @@ describe("inventory-move-blue-dream", () => {
       const pkg = w.packages.find((k) => k.productId === product("Blue Dream 7g").id && k.locationId === vault.id)!;
       pkg.quantity -= 20;
       w.packages.push({ ...pkg, id: newId(w, "pkg"), quantity: 20, locationId: shipping.id });
-      w.stockTransfers.push({ id: newId(w, "stt"), number: "ST-1", fromLocationId: vault.id, toLocationId: shipping.id, items: [{ productId: pkg.productId, batchId: null, quantity: 20 }], description: null, transferDatetime: new Date(NOW).toISOString() });
+      w.stockTransfers.push({ id: newId(w, "stt"), number: "ST-1", fromLocationId: vault.id, toLocationId: shipping.id, items: [{ productId: pkg.productId, batchId: null, quantity: 20 }], description: null, transferDatetime: new Date(NOW).toISOString(), completedAt: new Date(NOW).toISOString() });
     });
     expect(failures(id, "", after)).toEqual(["takes 20 units of Blue Dream 3.5g out of the Vault", "puts 20 units into the Shipping Room", "records one transfer of 20 units from the Vault to the Shipping Room", "changes no other product's stock", "changes nothing else"]);
   });
@@ -465,6 +478,13 @@ describe("orders-top-customers", () => {
     expect(failures(id, answer([...ranked.slice(0, 9), { name: "Coastal Roots", revenue: 85000 }]))).toEqual(["names the ten customers with the most revenue last quarter", "names no customer outside the top ten"]);
   });
   test("listing eleven", () => expect(failures(id, answer(ranked.slice(0, 11)))).toEqual(["names no customer outside the top ten"]));
+  test("the order is reported, not required", () => {
+    expect(notes(id, answer(ranked.slice(0, 10)))).toEqual([]);
+    const shuffled = [ranked[1]!, ranked[0]!, ...ranked.slice(2, 10)];
+    expect(failures(id, answer(shuffled))).toEqual([]);
+    expect(notes(id, answer(shuffled))).toEqual(["names the ten in descending order of revenue"]);
+    expect(notes(id, bullets([...ranked.slice(0, 10)].sort((a, b) => a.name.localeCompare(b.name)).map((r) => r.name)))).toEqual(["names the ten in descending order of revenue"]);
+  });
 });
 
 describe("orders-email-invoice", () => {
@@ -512,13 +532,159 @@ describe("purchasing-unpaid-pos", () => {
 describe("purchasing-record-payment", () => {
   const id = "purchasing-record-payment";
   const pay = (payment: Partial<World["purchasePayments"][0]>) => written((w) => {
-    w.purchasePayments.push({ id: newId(w, "ppy"), purchaseId: w.purchaseOrders.find((p) => p.purchaseNumber === "PO-1182")!.id, amount: 2500, paymentDatetime: new Date(NOW).toISOString(), paymentMethodId: w.paymentMethods[1]!.id, note: null, voided: false, ...payment });
+    const at = new Date(NOW).toISOString();
+    w.purchasePayments.push({ id: newId(w, "ppy"), paymentNumber: "PMT-99", purchaseId: w.purchaseOrders.find((p) => p.purchaseNumber === "PO-1182")!.id, amount: 2500, paymentDatetime: at, recordedAt: at, paymentMethodId: w.paymentMethods[1]!.id, note: null, voidedAt: null, ...payment });
   });
 
   test("$2,500 on PO-1182 passes", () => expect(failures(id, "", pay({}))).toEqual([]));
   test("the wrong amount", () => expect(failures(id, "", pay({ amount: 2000 }))).toEqual(["the payment is $2,500"]));
   test("on another purchase order", () => expect(failures(id, "", pay({ purchaseId: W.purchaseOrders.find((p) => p.purchaseNumber === "PO-1180")!.id }))).toEqual(["it is against PO-1182"]));
   test("with a payment method that does not exist", () => expect(failures(id, "", pay({ paymentMethodId: "pmm_99" }))).toEqual(["it is not voided and uses an existing payment method"]));
+});
+
+// ---------- negative checks: mentioning a wrong item to set it aside passes, naming it as part of the answer fails ----------
+
+describe("negative checks", () => {
+  const late = (i: World["invoices"][0]) => (NOW - Date.parse(i.dueDatetime)) / 86_400_000;
+  const owing = (i: World["invoices"][0]) => !i.voided && invoiceMoney(W, i).remaining > 0;
+  const q = quarter(TODAY, 1);
+  const revenue = (c: World["companies"][0]) => W.salesOrders.filter((o) => o.customerId === c.id && o.status !== "CANCELED" && day(o.orderDatetime) >= q.start && day(o.orderDatetime) <= q.end).reduce((n, o) => n + orderTotal(o), 0);
+  const ranked = W.companies.filter((c) => c.relationship === "CUSTOMER").map((c) => ({ name: c.name, revenue: revenue(c) })).sort((a, b) => b.revenue - a.revenue);
+  const main = menuProducts("Main Wholesale Menu");
+  const soldOut = main.filter((p) => availableQuantity(W, p) <= 0);
+  const metrcLabel = (name: string, imported: boolean) => W.metrcPackages.find((m) => m.itemName === name && (m.importStatus === "IMPORTED") === imported)!.label;
+  const unimported = W.metrcPackages.filter((m) => m.importStatus === "UNIMPORTED");
+  const manifests = W.metrcManifests;
+  const asked = manifests.find((m) => m.manifestNumber === "0001234567")!, other = manifests.find((m) => m.manifestNumber === "0001234568")!;
+  const veg = W.plants.filter((p) => p.status === "VEGETATIVE");
+  const vegGroups = W.plantGroups.filter((g) => veg.some((p) => p.plantGroupId === g.id));
+  const myOverdue = W.tasks.filter((t) => t.ownerId === W.me && t.status === "ACTIVE" && Date.parse(t.dueDate) < NOW);
+  const dueToday = W.tasks.find((t) => t.ownerId === W.me && t.status === "ACTIVE" && day(t.dueDate) === TODAY && Date.parse(t.dueDate) > NOW)!;
+  const colleagues = W.tasks.find((t) => t.ownerId !== W.me && t.status === "ACTIVE" && Date.parse(t.dueDate) < NOW)!;
+  const api = W.actions.filter((a) => a.source === "PUBLIC_API");
+  const apiOn = (ymd: string) => [...new Set(api.filter((a) => day(a.changedAt) === ymd).flatMap((a) => a.records.map((r) => r.name)))];
+  const below = W.products.filter((p) => belowMinimum(W, p));
+  const overdueInvoices = W.invoices.filter((i) => owing(i) && late(i) > 30);
+  const recent = W.invoices.find((i) => owing(i) && late(i) > 20 && late(i) <= 30)!;
+  const voided = W.invoices.find((i) => i.voided && late(i) > 30)!;
+  const status = (po: World["purchaseOrders"][0]) => purchaseMoney(W, po).status;
+  const unpaid = W.purchaseOrders.filter((po) => status(po) === "NOT_PAID" || status(po) === "PARTIALLY_PAID");
+  const overpaid = W.purchaseOrders.find((po) => status(po) === "OVER_PAID")!;
+  const month = lastMonth(TODAY);
+  const inMonth = W.harvests.filter((h) => day(h.harvestedAt) >= month.start && day(h.harvestedAt) <= month.end);
+  const strainGrams = [...new Set(inMonth.map((h) => h.strainName))].map((s) => [s, inMonth.filter((h) => h.strainName === s).reduce((n, h) => n + h.wetWeight, 0)] as const);
+  const thisMonth = W.harvests.find((h) => day(h.harvestedAt) > month.end && !inMonth.some((x) => x.strainName === h.strainName))!;
+  const sunset = company("Sunset Dispensary"), wellness = company("Sunset Wellness Collective");
+
+  const shortName = (t: World["tasks"][0]) => t.name.split(" ").slice(0, 4).join(" ");
+  const soldOutTable = table(["Product", "Available"], soldOut.map((p) => [p.name, availableQuantity(W, p)]));
+  const taskList = bullets(myOverdue.map((t) => `${shortName(t)}… (was due ${longDate(day(t.dueDate))})`));
+  const invoiceTable = (invoices: World["invoices"]) => table(["Invoice", "Customer", "Days overdue", "Sales rep"], invoices.map((i) => [i.invoiceNumber, W.companies.find((c) => c.id === i.customerId)!.name, Math.round(late(i)), userName(i.ownerId)]));
+  const topTen = ranked.slice(0, 10).map((r, i) => `${i + 1}. ${r.name} — ${money(r.revenue)}`).join("\n");
+  const poList = `Not paid in full: ${unpaid.map((po) => `${po.purchaseNumber} (${money(purchaseMoney(W, po).remaining)} left)`).join(", ")}.`;
+  const harvestTable = table(["Strain", "Wet weight"], strainGrams.map(([s, g]) => [s, `${g.toLocaleString("en-US")} g`]));
+
+  // Each case: the task, the negative check, an answer that mentions a wrong item while saying why it is not part of
+  // the answer (it must pass the whole grade), and an answer that includes that item as part of the answer (it must
+  // fail that check).
+  const cases: [string, string, string, string][] = [
+    ["commerce-main-menu-sold-out", "names no product of the main menu that is in stock",
+      // The answer of a real run, quoted.
+      `${soldOutTable}\n\nThe other 14 products are in stock. The lowest are Blue Dream Cartridge 1g with 65 available and Blue Dream 3.5g with 70.`,
+      `These are sold out:\n${bullets([...soldOut.map((p) => p.name), "Blue Dream Cartridge 1g (65 available)"])}`],
+    ["commerce-main-menu-sold-out", "names no product of the main menu that is in stock",
+      table(["Product", "Status"], main.map((p) => [p.name, availableQuantity(W, p) > 0 ? "In stock" : "Sold out"])),
+      `${soldOut.map((p) => p.name).join(", ")} and Blue Dream Cartridge 1g are sold out, while the rest have stock available.`],
+    ["commerce-main-menu-sold-out", "names no product of the main menu that is in stock",
+      `**Sold out**\n${bullets(soldOut.map((p) => p.name))}\n\n**In stock, but running low**\n${bullets(["Blue Dream Cartridge 1g: 65", "Blue Dream 3.5g: 70"])}`,
+      `**Sold out or nearly**\n${bullets([...soldOut.map((p) => p.name), "Blue Dream Cartridge 1g: 65"])}`],
+    ["commerce-main-menu-sold-out", "names no product sold out only on another menu",
+      `${soldOutTable}\n\nJack Herer 14g is sold out too, but it is only on the Spring Menu.`,
+      `${soldOutTable}\n| Jack Herer 14g | 0 |`],
+    ["commerce-main-menu-sold-out", "names no product sold out only on another menu",
+      `${soldOutTable}\n\n(Jack Herer 14g, on the Spring Menu, is out as well.)`,
+      `Sold out:\n${bullets([...soldOut.map((p) => p.name), "Jack Herer 14g (Spring Menu)"])}`],
+    ["compliance-unimported-packages", "names no package that is already imported",
+      `${table(["Tag", "Item"], unimported.map((m) => [m.label, m.itemName]))}\n\nThe cultivation license's other package, ${metrcLabel("Gelato Bulk Flower", true)} (Gelato Bulk Flower), is already imported.`,
+      `Not imported yet:\n${bullets([...unimported.map((m) => m.label), metrcLabel("Gelato Bulk Flower", true)])}`],
+    ["compliance-unimported-packages", "names no package that is already imported",
+      table(["Tag", "Import status"], [...unimported.map((m) => [m.label, "UNIMPORTED"]), [metrcLabel("Gelato Bulk Flower", true), "IMPORTED"]]),
+      table(["Tag", "Imported"], [...unimported.map((m) => [m.label, "No"]), [metrcLabel("Gelato Bulk Flower", true), "No"]])],
+    ["compliance-manifest-packages", "names no package of another manifest",
+      `${table(["Package", "Item"], asked.packages.map((p) => [p.label, p.itemName]))}\n\nManifest ${other.manifestNumber}, from Sierra Extracts, also comes in tomorrow, with ${other.packages[0]!.label} on it.`,
+      table(["Package", "Item", "Note"], [...asked.packages.map((p) => [p.label, p.itemName, ""]), [other.packages[0]!.label, other.packages[0]!.itemName, `manifest ${other.manifestNumber}`]])],
+    ["cultivation-plants-in-veg", "names no plant group without plants in veg",
+      `${veg.length} plants are in veg: ${vegGroups.map((g) => `${g.name} (${veg.filter((p) => p.plantGroupId === g.id).length})`).join(" and ")}. OG Kush Run 3 is in the Veg Room too, but its plants are still immature.`,
+      `${veg.length} plants are in veg: ${vegGroups.map((g) => g.name).join(", ")} and OG Kush Run 3.`],
+    ["directory-sunset-rep-buyer", "gives neither the rep nor the buyer of Sunset Wellness Collective",
+      `${userName(sunset.ownerId)} is the sales rep on Sunset Dispensary, and the buyer is ${buyerOf(sunset.id).email}. Not to be confused with Sunset Wellness Collective, whose rep is ${userName(wellness.ownerId)}.`,
+      `${userName(sunset.ownerId)} is the sales rep on Sunset Dispensary, and the buyer is ${buyerOf(sunset.id).email} (or ${buyerOf(wellness.id).email}).`],
+    ["directory-my-overdue-tasks", "names none of my tasks that are done or not yet due",
+      `${taskList}\n\n${dueToday.name} is due later today, so it is not overdue.`,
+      `${taskList}\n- ${dueToday.name} (due ${longDate(TODAY)})`],
+    ["directory-my-overdue-tasks", "names no task of another user",
+      `${taskList}\n\n${userName(colleagues.ownerId)} also has an overdue one, ${colleagues.name}, but it is assigned to them, not you.`,
+      `${taskList}\n- ${colleagues.name} (${userName(colleagues.ownerId)})`],
+    ["history-public-api-yesterday", "names no record the public API changed on another day",
+      `Yesterday the public API changed:\n${bullets(apiOn(addDays(TODAY, -1)))}\n\nThis morning it also changed ${apiOn(TODAY)[0]}, but that was today, not yesterday.`,
+      `Yesterday the public API changed:\n${bullets([...apiOn(addDays(TODAY, -1)), apiOn(TODAY)[0]!])}`],
+    ["history-public-api-yesterday", "names no record the public API changed on another day",
+      `Yesterday: ${apiOn(addDays(TODAY, -1)).join(", ")}.\n\nTwo days ago it had changed ${apiOn(addDays(TODAY, -2))[0]}.`,
+      `Yesterday: ${[...apiOn(addDays(TODAY, -1)), apiOn(addDays(TODAY, -2))[0]].join(", ")}.`],
+    ["history-public-api-yesterday", "names no record only users changed yesterday",
+      `Yesterday the public API changed:\n${bullets(apiOn(addDays(TODAY, -1)))}\n\nWedding Cake 7g and SO-4512 changed yesterday too, but by users through MCP and the web app, not by the public API.`,
+      `Yesterday the public API changed:\n${bullets([...apiOn(addDays(TODAY, -1)), "Wedding Cake 7g"])}`],
+    ["history-public-api-yesterday", "names no record only users changed yesterday",
+      `Yesterday: ${apiOn(addDays(TODAY, -1)).join(", ")}.\n\n(Maya Okafor also changed Wedding Cake 7g's low-stock alert.)`,
+      `Yesterday: ${[...apiOn(addDays(TODAY, -1)), "SO-4512"].join(", ")}.`],
+    ["inventory-below-minimum", "names no product at or above its minimum, or without one",
+      `${table(["Product", "Available", "Minimum"], below.map((p) => [p.name, availableQuantity(W, p), p.thresholdMin!]))}\n\nMilk Chocolate Bar 100mg is low too, with 25 available, but it has no minimum set.`,
+      table(["Product", "Available", "Minimum"], [...below.map((p) => [p.name, availableQuantity(W, p), p.thresholdMin!]), ["Milk Chocolate Bar 100mg", 25, "none"]])],
+    ["orders-overdue-invoices", "lists no invoice overdue 30 days or less, paid or voided",
+      `${invoiceTable(overdueInvoices)}\n\n${recent.invoiceNumber} is ${Math.round(late(recent))} days overdue, under the threshold.`,
+      invoiceTable([...overdueInvoices, recent])],
+    ["orders-overdue-invoices", "lists no invoice overdue 30 days or less, paid or voided",
+      `${invoiceTable(overdueInvoices)}\n\n${voided.invoiceNumber} is ${Math.round(late(voided))} days past due, but it was voided.`,
+      `${invoiceTable(overdueInvoices)}\n| ${voided.invoiceNumber} | Laurel Canyon Collective | ${Math.round(late(voided))} | ${userName(voided.ownerId)} |`],
+    ["orders-top-customers", "names no customer outside the top ten",
+      `${topTen}\n\n${ranked[10]!.name} came 11th with ${money(ranked[10]!.revenue).replace(/\.\d\d$/, "")}.`,
+      `${topTen}\n11. ${ranked[10]!.name} — ${money(ranked[10]!.revenue)}`],
+    ["orders-top-customers", "names no customer outside the top ten",
+      `${topTen}\n\nCoastal Roots placed an $85,000 order, but it was before the quarter started.`,
+      `${ranked.slice(0, 10).map((r) => r.name).join(", ")} and Coastal Roots.`],
+    ["purchasing-unpaid-pos", "lists no purchase order paid in full",
+      `${poList}\n\n${overpaid.purchaseNumber} is overpaid, not underpaid.`,
+      `Not paid in full: ${[...unpaid, overpaid].map((po) => `${po.purchaseNumber} (${money(purchaseMoney(W, po).remaining)} left)`).join(", ")}.`],
+    ["cultivation-harvest-by-strain", "gives no weight for strains not harvested last month",
+      `${harvestTable}\n\n${thisMonth.strainName} was harvested this month (${thisMonth.wetWeight.toLocaleString("en-US")} g), so it is not in the table.`,
+      `${harvestTable}\n| ${thisMonth.strainName} | ${thisMonth.wetWeight.toLocaleString("en-US")} g |`],
+  ];
+
+  test("cover every negative check of every task", () => {
+    const negative = tasks.flatMap((t) => t.grade({ answer: "", before: W, after: W }).filter((c) => / no |neither|none of/.test(c.name) && t.kind === "read").map((c) => `${t.id}: ${c.name}`));
+    const covered = new Set(cases.map(([id, check]) => `${id}: ${check}`));
+    expect(negative.filter((n) => !covered.has(n) && !n.includes("does not credit"))).toEqual([]);
+  });
+
+  test.each(cases)("%s, %s: the remark passes", (id, check, ok) => {
+    expect(failures(id, ok)).toEqual([]);
+    expect(task(id).grade({ answer: ok, before: W, after: W }).find((c) => c.name === check)?.pass).toBe(true);
+  });
+
+  test.each(cases)("%s, %s: the item in the answer fails", (id, check, _ok, wrong) => {
+    expect(failures(id, wrong)).toContain(check);
+  });
+
+  test("crediting someone with a change they did not make to the price", () => {
+    const id = "history-price-change-so-1042";
+    const order = W.salesOrders.find((o) => o.orderNumber === "SO-1042")!;
+    const history = W.actions.filter((a) => a.records.some((r) => r.id === order.id));
+    const change = history.find((a) => a.records.some((r) => r.fields.some((f) => f.field === "priceBase")))!;
+    const quantity = history.find((a) => a.records.some((r) => r.fields.some((f) => f.field === "quantity")))!;
+    const when = longDate(day(change.changedAt));
+    expect(failures(id, `${change.actorName} changed the price on ${when}. ${quantity.actorName} changed the quantity, not the price.`)).toEqual([]);
+    expect(failures(id, `${quantity.actorName} changed the price on ${when}, after ${change.actorName} had set it up.`)).toContain("does not credit anyone else with the price change");
+  });
 });
 
 describe("every task", () => {

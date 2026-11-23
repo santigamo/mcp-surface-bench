@@ -10,7 +10,8 @@ describe("search-products", () => {
     const first = call("search-products");
     expect(first.items).toHaveLength(10);
     expect(first.totalCount).toBe(world.products.filter((p) => p.active).length);
-    expect(first.items[0].name).toBe("Blue Dream Badder 1g");
+    // The newest product: the bulk flower imported on the cultivation license.
+    expect(first.items[0].name).toBe("Gelato Bulk Flower");
     const second = call("search-products", { cursor: first.nextCursor });
     expect(second.items[0].name).not.toBe(first.items[0].name);
     expect(call("search-products", { status: "INACTIVE" }).items.map((p: any) => [p.name, p.isInactive])).toEqual([["Sour Diesel Pre-Roll 5-Pack", true]]);
@@ -67,7 +68,7 @@ describe("search-products", () => {
     const order = (field: string, direction = "ASC") => call("search-products", { limit: 100, sortBy: { field, direction } }).items;
     expect(order("NAME")[0].name).toBe("Blue Dream 1g Pre-Roll");
     expect(order("UNIT_PRICE", "DESC")[0].name).toBe("Jack Herer 14g");
-    expect(order("QUANTITY_ACTIVE", "DESC")[0].name).toBe("Jack Herer Pre-Roll 10-Pack");
+    expect(order("QUANTITY_ACTIVE", "DESC")[0].name).toBe("Gelato Bulk Flower"); // 5,100 grams
     expect(order("QUANTITY_AVAILABLE")[0].quantityAvailable).toBe("0");
     expect(order("INSERTED_AT")[0].name).toBe("Blue Dream 3.5g");
     expect(order("UPDATED_AT")[0].name).toBe("Blue Dream 3.5g");
@@ -82,13 +83,13 @@ describe("search-products", () => {
     expect(offMain.totalCount).toBe(world.products.length - main.products.length);
     expect(names(call("search-products", { tagIds: ["tag_3"] })).sort()).toEqual(["Blue Dream Pre-Roll 5-Pack", "Mango Gummies 100mg"]);
     expect(call("search-products", { strainIds: ["str_1"] }).totalCount).toBe(6);
-    expect(call("search-products", { productGroupIds: ["grp_1"], status: "ANY" }).totalCount).toBe(19);
+    expect(call("search-products", { productGroupIds: ["grp_1"], status: "ANY" }).totalCount).toBe(20);
     expect(names(call("search-products", { productSubcategoryIds: ["sub_6"] })).sort()).toEqual(["Gelato Infused Pre-Roll", "OG Kush Infused Pre-Roll", "Sour Diesel Infused Pre-Roll"]);
     const vendor = world.companies.find((c) => c.name === "Sweet Leaf Confections")!;
     expect(call("search-products", { vendorId: vendor.id }).totalCount).toBe(6);
     expect(call("search-products", { brandIds: [vendor.id] }).totalCount).toBe(0);
     expect(call("search-products", { unitTypeCategories: ["COUNT"] }).totalCount).toBe(37);
-    expect(call("search-products", { unitTypeCategories: ["WEIGHT"] }).totalCount).toBe(0);
+    expect(names(call("search-products", { unitTypeCategories: ["WEIGHT"] }))).toEqual(["Gelato Bulk Flower"]);
     expect(names(call("search-products", { ids: ["prd_1", "9"] })).sort()).toEqual(["Blue Dream 1g Pre-Roll", "Blue Dream 3.5g"]);
   });
 
@@ -158,7 +159,8 @@ describe("bulk-update-products", () => {
     const action = world.actions.at(-1)!;
     expect(action.source).toBe("MCP");
     expect(action.records).toHaveLength(12);
-    expect(action.records[0]!.fields[0]).toMatchObject({ field: "tagIds", label: "Tags" });
+    // A tag on a product is a PRODUCT_TAG line of the product, which the world gives no id.
+    expect(action.records[0]).toMatchObject({ type: "PRODUCT", entity: "PRODUCT_TAG", rowId: null, op: "INSERT", rowLabel: "Summer promo", fields: [{ field: "tagId", label: "Tag", oldValue: null, newValue: "Summer promo" }] });
     const untouched = world.products.find((p) => p.name === "Blue Dream Pre-Roll 5-Pack")!;
     expect(untouched.updatedAt).toBe("2025-04-28T10:00:00-07:00");
   });
@@ -230,7 +232,9 @@ describe("mutate-product", () => {
       subcategory: { id: "sub_2", name: "Quarters" }, tags: [{ id: "tag_3", name: "Summer promo" }], isInactive: true, strain: null,
     });
     const action = world.actions.at(-1)!;
-    expect(action.records).toHaveLength(1);
+    // The product's own row, then a line for the tag it gained and one for the tag it lost.
+    expect(action.records.map((r) => [r.entity, r.op, r.rowLabel])).toEqual([["PRODUCT", "UPDATE", null], ["PRODUCT_TAG", "INSERT", "Summer promo"], ["PRODUCT_TAG", "DELETE", "Best seller"]]);
+    expect(action.records.every((r) => r.type === "PRODUCT" && r.id === "prd_1" && r.name === "Blue Dream 3.5g Jar")).toBe(true);
     expect(action.records[0]!.fields.find((f) => f.field === "unitPrice")).toEqual({ field: "unitPrice", label: "Unit price", oldValue: "22.00", newValue: "23.00" });
     expect(action.records[0]!.fields.find((f) => f.field === "categoryId")).toBeUndefined(); // unchanged
     expect(product.updatedAt).toBe(action.changedAt);
@@ -323,7 +327,9 @@ describe("create-reference-type", () => {
     const sub = call("create-reference-type", { type: "PRODUCT_SUBCATEGORY", name: "Singles", productCategoryId: cat.id }).productSubcategory;
     expect(sub.category).toEqual({ id: cat.id });
     expect(world.categories.find((c) => c.id === cat.id)!.subcategories).toEqual([{ id: sub.id, name: "Singles" }]);
-    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "PRODUCT_SUBCATEGORY", op: "INSERT", name: "Singles" });
+    // A subcategory is a line of its category; the other kinds are records of their own.
+    expect(world.actions.at(-1)!.records[0]).toMatchObject({ type: "PRODUCT_CATEGORY", id: cat.id, name: "Infused Flower", entity: "PRODUCT_SUBCATEGORY", rowId: sub.id, op: "INSERT", rowLabel: "Singles" });
+    expect(world.actions.at(-6)!.records[0]).toMatchObject({ type: "TAG", id: "tag_6", entity: "TAG", rowId: "tag_6", op: "INSERT" });
   });
 
   test("refuses duplicates, misplaced or missing extra inputs, and overlong names", () => {

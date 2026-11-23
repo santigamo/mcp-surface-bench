@@ -1,8 +1,8 @@
 // Who is signed in, and the company's users.
-import { matches, normalizeIds, page, sorted, type SortBy } from "../../../src/core/kit.ts";
+import { closeness, inList, normalizeIds, page, ranked, sorted, type SortBy } from "../../../src/core/kit.ts";
 import { defineTool } from "../../../src/core/tool.ts";
 import { fullName, PREFIX, type World } from "../world.ts";
-import { userProfile } from "./shared.ts";
+import { serial, userProfile } from "./shared.ts";
 
 export const tools = [
   defineTool<World>({
@@ -12,7 +12,7 @@ export const tools = [
       const me = w.users.find((u) => u.id === w.me)!;
       return {
         user: { id: me.id, fullName: fullName(me), email: me.email, isAdmin: true, ...(args.includePermissions ? { permissions: [] } : {}) },
-        myCompany: { id: w.company.id, name: w.company.name, legalBusinessName: `${w.company.name.replace(/ Co\.$/, "")} Company, Inc.` },
+        myCompany: { id: w.company.id, name: w.company.name, legalBusinessName: w.company.legalName },
         timezone: w.timezone,
         usState: w.company.state,
         complianceType: w.company.complianceSystem,
@@ -28,10 +28,12 @@ export const tools = [
     supports: ["limit", "cursor", "ids", "search", "sortBy"],
     run(args: { limit?: number; cursor?: string; ids?: string[]; search?: string; sortBy?: SortBy }, { world: w }) {
       const ids = normalizeIds(args.ids, PREFIX.user);
-      let users = w.users.filter((u) => (!ids || ids.includes(u.id)) && matches(args.search, fullName(u), u.email));
-      // With `search` the documentation ranks by closeness; a substring match in stored order is the closest this world gets.
-      if (!args.search) users = sorted(users, args.sortBy, { FULL_NAME: fullName, INSERTED_AT: (u) => +u.id.split("_")[1]!, UPDATED_AT: (u) => +u.id.split("_")[1]! }, { field: "FULL_NAME", direction: "ASC" });
-      return page(users, args, (u) => ({ id: u.id, email: u.email, profile: userProfile(u) }));
+      const users = w.users.filter((u) => inList(ids, u.id));
+      // Users carry no timestamps and none has changed since it was added, so the order they were added stands in for both.
+      const ordered = args.search
+        ? ranked(users, (u) => closeness(args.search!, [u.email], [fullName(u)]))
+        : sorted(users, args.sortBy, { FULL_NAME: fullName, INSERTED_AT: (u) => serial(u.id), UPDATED_AT: (u) => serial(u.id) }, { field: "UPDATED_AT", direction: "DESC" });
+      return page(ordered, args, (u) => ({ id: u.id, email: u.email, profile: userProfile(u) }));
     },
   }),
 ];

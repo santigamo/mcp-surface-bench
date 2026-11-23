@@ -22,3 +22,13 @@ test("search-users pages, filters and sorts", () => {
   expect(error("search-users", { ownerAssignableEntityType: "ORDER" })).toContain("unsupported_input");
   expect(error("search-users", { nope: 1 })).toContain("invalid_arguments");
 });
+
+test("search-users ranks substring matches first, then names within a typo", () => {
+  const { call } = bench();
+  const names = (search: string) => call("search-users", { search }).items.map((u: any) => u.profile.fullName);
+  expect(names("maya okafr")).toEqual(["Maya Okafor"]);
+  expect(names("tidewatercannabis")).toHaveLength(5);
+  expect(names("priya@")).toEqual(["Priya Nair"]);
+  // Without search, the default order is the documented UPDATED_AT DESC: the latest user added first.
+  expect(call("search-users").items[0].profile.fullName).toBe("Lena Hartmann");
+});

@@ -1,16 +1,16 @@
 // The catalog: products, the named lists records point at (categories, tags, groups...), custom fields and price tiers.
-import { instant, matches, money, normalizeId, normalizeIds, page, qty, sorted, type SortBy } from "../../../src/core/kit.ts";
+import { closeness, inList, inStatus, instant, matches, money, normalizeId, normalizeIds, page, qty, ranked, sorted, type SortBy, type Status } from "../../../src/core/kit.ts";
 import { defineTool, ToolError } from "../../../src/core/tool.ts";
 import {
-  activeQuantity, availableQuantity, belowMinimum, newId, PREFIX,
-  type Action, type Category, type CustomField, type Id, type Named, type Product, type UnitType, type World,
+  activeQuantity, availableQuantity, belowMinimum, incomingQuantity, newId, passedTestingQuantity, PREFIX,
+  type ActionRow, type Category, type CustomField, type Id, type Named, type Product, type RecordType, type RowEntity, type UnitType, type World,
 } from "../world.ts";
-import { find, named, recordAction, stamp, type C } from "./shared.ts";
+import { customFieldValues, find, named, productFilter as kindFilter, recordAction, recordUrl, serial, stamp, type C } from "./shared.ts";
 
-type Change = Action["records"][number]["fields"][number];
+type Change = ActionRow["fields"][number];
 
 /** Records without timestamps were numbered as they were created, so the number orders them by age. */
-const seq = (x: { id: Id }) => Number(x.id.split("_")[1]);
+const seq = (x: { id: Id }) => serial(x.id);
 const NAME_OR_AGE = { NAME: (x: Named) => x.name, INSERTED_AT: seq, UPDATED_AT: seq };
 const RECENT: SortBy = { field: "UPDATED_AT", direction: "DESC" };
 const A_TO_Z: SortBy = { field: "NAME", direction: "ASC" };
@@ -23,16 +23,6 @@ const subcategoriesOf = (w: World) => w.categories.flatMap((c) => c.subcategorie
 
 // ---------- products: what they hold beyond the stored record ----------
 
-/** Units on purchase orders not yet received, drafts included. The world keeps no partial receipts, so an open order counts in full. */
-const incomingQuantity = (w: World, p: Product) =>
-  w.purchaseOrders.filter((o) => o.status !== "COMPLETED").flatMap((o) => o.items).filter((i) => i.productId === p.id).reduce((n, i) => n + i.quantity, 0);
-
-/** The part of the active quantity in packages whose lab test passed; batch- and product-tracked products have none. */
-const passedTesting = (w: World, p: Product) =>
-  p.tracking === "PACKAGE"
-    ? qty(w.packages.filter((k) => k.productId === p.id && k.status === "ACTIVE" && k.labTestingState === "TestPassed").reduce((n, k) => n + k.quantity, 0))
-    : null;
-
 /** The locations holding some of the product's active quantity. */
 const quantitiesByLocation = (w: World, p: Product) =>
   w.locations
@@ -44,10 +34,6 @@ const menusOf = (w: World, p: Product) => w.menus.filter((m) => m.products.some(
 
 const tagsOf = (w: World, p: Product) => p.tagIds.map((id) => named(w.tags, id)!);
 
-/** Every custom field defined on products, each blank: the world stores no custom field values. */
-const productCustomFields = (w: World) =>
-  w.customFields.filter((f) => f.entityType === "PRODUCT").map((f) => ({ customField: { id: f.id, name: f.name, fieldType: f.fieldType }, value: null }));
-
 const quantityOrNull = (n: number | null) => (n === null ? null : qty(n));
 
 // ---------- products: renderers ----------
@@ -56,7 +42,7 @@ const quantityOrNull = (n: number | null) => (n === null ? null : qty(n));
 function productCore(w: World, p: Product) {
   return {
     id: p.id,
-    customFields: productCustomFields(w),
+    customFields: customFieldValues(w, "PRODUCT"),
     name: p.name,
     sku: p.sku,
     upc: null,
@@ -69,7 +55,7 @@ function productCore(w: World, p: Product) {
     activeQuantityCost: money(activeQuantity(w, p) * p.unitCost),
     unitsPerCase: null,
     quantityActive: qty(activeQuantity(w, p)),
-    quantityActivePassedTesting: passedTesting(w, p),
+    quantityActivePassedTesting: quantityOrNull(passedTestingQuantity(w, p)),
     quantityAvailable: qty(availableQuantity(w, p)),
     quantityIncoming: qty(incomingQuantity(w, p)),
     quantityPendingOutput: "0",
@@ -130,7 +116,7 @@ function productDetail(w: World, p: Product, inc: ProductIncludes) {
     menus,
     // No product in this world has an image.
     thumbnailImageUrl: "",
-    url: `https://app.distru.com/products/${p.id}`,
+    url: recordUrl("product", p.id),
     owner: null,
     ...(inc.includeImages ? { images: [] } : {}),
     ...(inc.includeTags ? { tags: tagsOf(w, p) } : {}),
@@ -148,7 +134,7 @@ type ProductSearch = {
   cursor?: string;
   ids?: string[];
   search?: string;
-  status?: "ACTIVE" | "ANY" | "INACTIVE";
+  status?: Status;
   belowQuantityAvailableThresholdMin?: boolean;
   brandIds?: string[];
   menuIds?: string[];
@@ -163,29 +149,27 @@ type ProductSearch = {
   sortBy?: SortBy;
 };
 
-/** True when no set is given, or when any of the values is in it. */
-const anyIn = (set: Set<Id> | undefined, ...values: (Id | null)[]) => !set || values.some((v) => v !== null && set.has(v));
+/** How closely a product matches search-products' `search`: a substring of its name or SKU, else a typo-level match on its name. */
+const productCloseness = (term: string, p: Product) => closeness(term, [p.sku], [p.name]);
 
-/** The test a product must pass to be listed by a search-products call. */
+/** The test a product must pass to be listed by a search-products call, `search` aside. */
 function productFilter(w: World, a: ProductSearch): (p: Product) => boolean {
-  const set = (values: string[] | undefined, prefix: string) => values && new Set(normalizeIds(values, prefix));
   const onMenus = (values: string[] | undefined) => {
-    const menus = set(values, PREFIX.menu);
-    return menus && new Set(w.menus.filter((m) => menus.has(m.id)).flatMap((m) => m.products.map((x) => x.productId)));
+    const menus = normalizeIds(values, PREFIX.menu);
+    return menus && w.menus.filter((m) => menus.includes(m.id)).flatMap((m) => m.products.map((x) => x.productId));
   };
-  const ids = set(a.ids, PREFIX.product), categories = set(a.productCategoryIds, PREFIX.category), subcategories = set(a.productSubcategoryIds, PREFIX.subcategory);
-  const groups = set(a.productGroupIds, PREFIX.group), strains = set(a.strainIds, PREFIX.strain), tags = set(a.tagIds, PREFIX.tag), brands = set(a.brandIds, PREFIX.company);
-  const vendors = set(a.vendorId === undefined ? undefined : [a.vendorId], PREFIX.company);
+  const ids = normalizeIds(a.ids, PREFIX.product), strains = normalizeIds(a.strainIds, PREFIX.strain);
+  // The category, tag, vendor, brand and group filters mean what they mean on every other product filter.
+  const ofKind = kindFilter(w, {
+    productCategoryIds: a.productCategoryIds, productSubcategoryIds: a.productSubcategoryIds, productTagIds: a.tagIds, productGroupIds: a.productGroupIds,
+    brandIds: a.brandIds, vendorIds: a.vendorId === undefined ? undefined : [a.vendorId],
+  });
   const onMenu = onMenus(a.menuIds), offMenu = onMenus(a.notOnMenuIds);
-  const status = a.status ?? "ACTIVE";
   const unitCategory = (p: Product) => w.unitTypes.find((u) => u.id === p.unitTypeId)!.category;
   return (p) =>
-    (status === "ANY" || p.active === (status === "ACTIVE")) &&
-    matches(a.search, p.name, p.sku) &&
-    anyIn(ids, p.id) && anyIn(categories, p.categoryId) && anyIn(subcategories, p.subcategoryId) && anyIn(groups, p.groupId) &&
-    anyIn(strains, p.strainId) && anyIn(tags, ...p.tagIds) && anyIn(brands, p.brandId) && anyIn(vendors, p.vendorId) &&
-    anyIn(onMenu, p.id) && !offMenu?.has(p.id) &&
-    (!a.unitTypeCategories || a.unitTypeCategories.includes(unitCategory(p))) &&
+    inStatus(a.status, p.active) && inList(ids, p.id) && inList(strains, p.strainId) && ofKind(p) &&
+    inList(onMenu, p.id) && !offMenu?.includes(p.id) &&
+    inList(a.unitTypeCategories, unitCategory(p)) &&
     (a.belowQuantityAvailableThresholdMin === undefined || belowMinimum(w, p) === a.belowQuantityAvailableThresholdMin);
 }
 
@@ -210,7 +194,8 @@ function sortProducts(w: World, products: Product[], sortBy: SortBy | undefined)
 // ---------- products: writes ----------
 
 /** The product fields the catalog write tools change, as the world stores them. */
-type Editable = "name" | "sku" | "active" | "categoryId" | "subcategoryId" | "vendorId" | "brandId" | "strainId" | "groupId" | "unitPrice" | "unitCost" | "thresholdMin" | "thresholdMax" | "tagIds";
+type Field = "name" | "sku" | "active" | "categoryId" | "subcategoryId" | "vendorId" | "brandId" | "strainId" | "groupId" | "unitPrice" | "unitCost" | "thresholdMin" | "thresholdMax";
+type Editable = Field | "tagIds";
 type Patch = Partial<Pick<Product, Editable>>;
 
 /** The inputs mutate-product and bulk-update-products share, plus the tag edits only the bulk tool has. */
@@ -235,8 +220,8 @@ type ProductEdit = {
 
 const nameOf = (items: (w: World) => Named[]) => (w: World, id: Id | null) => named(items(w), id)?.name ?? null;
 
-/** How each patched field is logged in record history: the input it came from, its label and how its value prints. */
-const LOGGED: { [K in Editable]: { field: string; label: string; show: (w: World, v: Product[K]) => string | null } } = {
+/** How each patched field is logged on the product's own row: the input it came from, its label and how its value prints. */
+const LOGGED: { [K in Field]: { field: string; label: string; show: (w: World, v: Product[K]) => string | null } } = {
   name: { field: "name", label: "Name", show: (_, v) => v },
   sku: { field: "sku", label: "SKU", show: (_, v) => v },
   active: { field: "isInactive", label: "Inactive", show: (_, v) => String(!v) },
@@ -250,7 +235,6 @@ const LOGGED: { [K in Editable]: { field: string; label: string; show: (w: World
   unitCost: { field: "unitCost", label: "Unit cost", show: (_, v) => money(v) },
   thresholdMin: { field: "quantityAvailableThresholdMin", label: "Low-stock alert", show: (_, v) => quantityOrNull(v) },
   thresholdMax: { field: "quantityAvailableThresholdMax", label: "High-stock alert", show: (_, v) => quantityOrNull(v) },
-  tagIds: { field: "tagIds", label: "Tags", show: (w, v) => v.map((id) => named(w.tags, id)!.name).join(", ") },
 };
 
 function amount(value: string | number, field: string): number {
@@ -321,19 +305,33 @@ function problemWith(w: World, p: Product, patch: Patch): string | null {
   return null;
 }
 
-function logged<K extends Editable>(w: World, p: Product, patch: Patch, key: K): Change | null {
+function logged<K extends Field>(w: World, p: Product, patch: Patch, key: K): Change | null {
   const before = p[key], after = patch[key] as Product[K];
-  if (JSON.stringify(before) === JSON.stringify(after)) return null;
+  if (before === after) return null;
   const { field, label, show } = LOGGED[key];
   return { field, label, oldValue: show(w, before), newValue: show(w, after) };
 }
 
-/** Saves a checked patch on a product. Returns its history record, or null when the patch changes nothing. */
-function save(c: C, p: Product, patch: Patch): Action["records"][number] | null {
-  const fields = (Object.keys(patch) as Editable[]).map((k) => logged(c.world, p, patch, k)).filter((f) => f !== null);
-  if (!fields.length) return null;
-  Object.assign(p, patch, { updatedAt: stamp(c) });
-  return { type: "PRODUCT", id: p.id, name: p.name, op: "UPDATE", rowLabel: null, fields };
+/** A tag added to or taken off a product: a row of the product's PRODUCT_TAG lines, which the world gives no id. */
+function tagRow(w: World, p: Product, tagId: Id, op: "INSERT" | "DELETE"): ActionRow {
+  const tag = named(w.tags, tagId)!.name;
+  return { type: "PRODUCT", id: p.id, name: p.name, entity: "PRODUCT_TAG", rowId: null, op, rowLabel: tag, fields: [{ field: "tagId", label: "Tag", oldValue: op === "DELETE" ? tag : null, newValue: op === "INSERT" ? tag : null }] };
+}
+
+/** Saves a checked patch on a product. Returns the history rows it wrote, none when the patch changes nothing. */
+function save(c: C, p: Product, patch: Patch): ActionRow[] {
+  const w = c.world;
+  const fields = (Object.keys(patch) as Editable[]).filter((k): k is Field => k !== "tagIds").map((k) => logged(w, p, patch, k)).filter((f) => f !== null);
+  const tags = patch.tagIds ?? p.tagIds;
+  const rows = [
+    ...(fields.length ? [{ type: "PRODUCT" as const, id: p.id, name: p.name, entity: "PRODUCT" as const, rowId: p.id, op: "UPDATE" as const, rowLabel: null, fields }] : []),
+    ...tags.filter((t) => !p.tagIds.includes(t)).map((t) => tagRow(w, p, t, "INSERT")),
+    ...p.tagIds.filter((t) => !tags.includes(t)).map((t) => tagRow(w, p, t, "DELETE")),
+  ];
+  if (rows.length) Object.assign(p, patch, { updatedAt: stamp(c) });
+  // The own row names the product as it is after the save.
+  for (const r of rows) r.name = p.name;
+  return rows;
 }
 
 // ---------- lookups ----------
@@ -383,21 +381,24 @@ type LookupSearch = {
   chargeTypes?: ("CHARGE" | "DISCOUNT")[];
   ids?: string[];
   search?: string;
-  status?: "ACTIVE" | "ANY" | "INACTIVE";
+  status?: Status;
   unitTypeCategories?: UnitType["category"][];
   sortBy?: SortBy;
 };
+
+/** `search` on lookups: a substring of the name (or of a subcategory's), and on PAYMENT_METHOD also a word within a typo. */
+function lookupMatches(r: LookupRow, a: LookupSearch): boolean {
+  if (!a.search) return true;
+  const names = [r.name, ...(r.alsoNamed ?? [])];
+  return a.type === "PAYMENT_METHOD" ? closeness(a.search, [], names) !== undefined : matches(a.search, ...names);
+}
 
 function lookupRows(w: World, a: LookupSearch): LookupRow[] {
   const source = LOOKUPS[a.type];
   if (!source) return [];
   const ids = normalizeIds(a.ids, source.prefix);
-  const status = a.status ?? "ACTIVE";
   const rows = source.rows(w).filter((r) =>
-    (!ids || ids.includes(r.id)) &&
-    matches(a.search, r.name, ...(r.alsoNamed ?? [])) &&
-    (r.active === undefined || status === "ANY" || r.active === (status === "ACTIVE")) &&
-    (!a.unitTypeCategories || (r.unitCategory !== undefined && a.unitTypeCategories.includes(r.unitCategory))));
+    inList(ids, r.id) && lookupMatches(r, a) && (r.active === undefined || inStatus(a.status, r.active)) && (!a.unitTypeCategories || inList(a.unitTypeCategories, r.unitCategory)));
   const fallback = NAMED_A_TO_Z.includes(a.type) ? A_TO_Z : RECENT;
   const sortBy = a.search && !SORTED_WHILE_SEARCHING.includes(a.type) ? undefined : a.sortBy;
   return sorted(rows, sortBy, NAME_OR_AGE, fallback);
@@ -429,15 +430,26 @@ function checkReference(a: NewReference): string {
   return name;
 }
 
-/** Adds a value to a named list after checking its name is free, and logs it. */
-function insert<T extends Named>(c: C, type: ReferenceType, list: T[], prefix: string, fields: Omit<T, "id">): T {
+/**
+ * The record each kind of value is logged under. A subcategory is a line of its category, so it shows in the
+ * category's history; a product tag is a TAG record.
+ */
+const LOGGED_AS: Record<Exclude<ReferenceType, "RELATIONSHIP_TYPE" | "PRODUCT_SUBCATEGORY">, RecordType> = {
+  PRODUCT_TAG: "TAG", PRODUCT_GROUP: "PRODUCT_GROUP", COMPANY_GROUP: "COMPANY_GROUP", PRODUCT_CATEGORY: "PRODUCT_CATEGORY", PAYMENT_METHOD: "PAYMENT_METHOD",
+};
+
+/** Adds a value to a named list after checking its name is free, and logs it: as a record, or as a line of `parent`. */
+function insert<T extends Named>(c: C, type: ReferenceType, list: T[], prefix: string, fields: Omit<T, "id">, parent?: { type: RecordType; id: Id; name: string; entity: RowEntity }): T {
   // Only RELATIONSHIP_TYPE and COMPANY_GROUP tell "flower" from "Flower".
   const key = (s: string) => (type === "COMPANY_GROUP" ? s : s.toLowerCase());
   const clash = list.find((x) => key(x.name) === key(fields.name));
   if (clash) throw new ToolError(`A ${type.toLowerCase().replace("_", " ")} named "${clash.name}" already exists (${clash.id}): use it instead.`);
   const item = { id: newId(c.world, prefix), ...fields } as T;
   list.push(item);
-  recordAction(c, [{ type, id: item.id, name: item.name, op: "INSERT", rowLabel: null, fields: [] }]);
+  const row: ActionRow = parent
+    ? { type: parent.type, id: parent.id, name: parent.name, entity: parent.entity, rowId: item.id, op: "INSERT", rowLabel: item.name, fields: [{ field: "name", label: "Name", oldValue: null, newValue: item.name }] }
+    : { type: LOGGED_AS[type as keyof typeof LOGGED_AS], id: item.id, name: item.name, entity: LOGGED_AS[type as keyof typeof LOGGED_AS], rowId: item.id, op: "INSERT", rowLabel: null, fields: [] };
+  recordAction(c, [row]);
   return item;
 }
 
@@ -448,7 +460,7 @@ function createReference(c: C, a: NewReference, name: string) {
     case "PRODUCT_GROUP": return { productGroup: plain(insert(c, a.type, w.groups, PREFIX.group, { name })) };
     case "COMPANY_GROUP": return { companyGroup: plain(insert(c, a.type, w.companyGroups, PREFIX.companyGroup, { name })) };
     case "PAYMENT_METHOD":
-      // The world keeps a payment method's name only; its type is echoed back, not stored.
+      // No tool prints a payment method's type but this one, which returns what the call sent; the world keeps the name.
       return { paymentMethod: { ...plain(insert(c, a.type, w.paymentMethods, PREFIX.paymentMethod, { name })), type: a.paymentMethodType! } };
     case "PRODUCT_CATEGORY": {
       const official = a.officialProductCategoryId as Category["official"];
@@ -458,7 +470,7 @@ function createReference(c: C, a: NewReference, name: string) {
     }
     case "PRODUCT_SUBCATEGORY": {
       const category = find(w.categories, normalizeId(a.productCategoryId!, PREFIX.category), "product category");
-      const sub = insert(c, a.type, category.subcategories, PREFIX.subcategory, { name });
+      const sub = insert(c, a.type, category.subcategories, PREFIX.subcategory, { name }, { type: "PRODUCT_CATEGORY", id: category.id, name: category.name, entity: "PRODUCT_SUBCATEGORY" });
       return { productSubcategory: { ...plain(sub), category: { id: category.id } } };
     }
     case "RELATIONSHIP_TYPE":
@@ -516,8 +528,7 @@ export const tools = [
     ],
     run(a: ProductSearch, { world: w }) {
       const found = w.products.filter(productFilter(w, a));
-      // With `search` the documentation ranks by closeness; a substring match in stored order is the closest this world gets.
-      return page(a.search ? found : sortProducts(w, found, a.sortBy), a, (p) => productRow(w, p));
+      return page(a.search ? ranked(found, (p) => productCloseness(a.search!, p)) : sortProducts(w, found, a.sortBy), a, (p) => productRow(w, p));
     },
   }),
 
@@ -544,8 +555,8 @@ export const tools = [
       const patch = readEdit(c.world, a)(p);
       const problem = problemWith(c.world, p, patch);
       if (problem) throw new ToolError(`${p.name} was not saved: ${problem}.`);
-      const record = save(c, p, patch);
-      if (record) recordAction(c, [record]);
+      const rows = save(c, p, patch);
+      if (rows.length) recordAction(c, rows);
       return { product: productDetail(c.world, p, { includeTags: true }) };
     },
   }),
@@ -572,8 +583,8 @@ export const tools = [
         return problem ? [`${p.name} (${p.id}): ${problem}`] : [];
       });
       if (failures.length) throw new ToolError(`Nothing was saved. ${failures.join(". ")}.`);
-      const records = products.map((p) => save(c, p, edit(p))).filter((r) => r !== null);
-      if (records.length) recordAction(c, records);
+      const rows = products.flatMap((p) => save(c, p, edit(p)));
+      if (rows.length) recordAction(c, rows);
       return { products: products.map((p) => ({ id: p.id, name: p.name, sku: p.sku, updatedAt: p.updatedAt })) };
     },
   }),
@@ -603,9 +614,9 @@ export const tools = [
     supports: ["limit", "cursor", "ids", "search", "entityType", "sortBy"],
     run(a: { limit?: number; cursor?: string; ids?: string[]; search?: string; entityType?: string; sortBy?: SortBy }, { world: w }) {
       const ids = normalizeIds(a.ids, PREFIX.customField);
-      const found = w.customFields.filter((f) => (!ids || ids.includes(f.id)) && (!a.entityType || f.entityType === a.entityType) && matches(a.search, f.name, f.description));
-      // With `search` the documentation ranks by similarity; a substring match in stored order is the closest this world gets.
-      return page(a.search ? found : sorted(found, a.sortBy, NAME_OR_AGE, RECENT), a, customFieldOut);
+      const found = w.customFields.filter((f) => inList(ids, f.id) && (!a.entityType || f.entityType === a.entityType));
+      const ordered = a.search ? ranked(found, (f) => closeness(a.search!, [f.name, f.description])) : sorted(found, a.sortBy, NAME_OR_AGE, RECENT);
+      return page(ordered, a, customFieldOut);
     },
   }),
 
@@ -625,7 +636,7 @@ export const tools = [
         description: a.description?.trim() || null, required: a.required ?? false, options,
       };
       w.customFields.push(field);
-      recordAction(c, [{ type: "CUSTOM_FIELD", id: field.id, name, op: "INSERT", rowLabel: null, fields: [] }]);
+      recordAction(c, [{ type: "CUSTOM_FIELD", id: field.id, name, entity: "CUSTOM_FIELD", rowId: field.id, op: "INSERT", rowLabel: null, fields: [] }]);
       return { customField: customFieldOut(field) };
     },
   }),

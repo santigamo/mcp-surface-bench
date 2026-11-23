@@ -16,8 +16,10 @@ test("search-licenses lists both Metrc licenses with their sync health", () => {
   const dist = call("search-licenses", { ids: [license(world, "DISTRIBUTION")] }).items[0];
   expect(dist.hasCultivation).toBe(false);
   expect(dist.metrcPullStatus.cachesUpdatedUpUntil.harvests).toBeNull();
-  expect(dist.metrcPushStatus).toMatchObject({ queuedCount: 1, failedCount: 2, oldestIncompleteActivity: { type: "ADJUST_PACKAGE", status: "FAILED", errorCount: 1 } });
-  expect(dist.metrcPushStatus.lastCompletedActivityDatetime).toStartWith(`${YESTERDAY}T17:10`);
+  // One failure, which holds back the three changes queued after it.
+  expect(dist.metrcPushStatus).toMatchObject({ queuedCount: 3, failedCount: 1, oldestIncompleteActivity: { type: "ADJUST_PACKAGE", status: "FAILED", errorCount: 1, errorType: "EXTERNAL_VALIDATION" } });
+  expect(dist.metrcPushStatus.oldestIncompleteActivity.queuedDatetime).toStartWith(`${YESTERDAY}T14:05`);
+  expect(dist.metrcPushStatus.lastCompletedActivityDatetime).toStartWith(`${YESTERDAY}T11:45`);
   const cult = call("search-licenses", { ids: ["2"] }).items[0];
   expect(cult).toMatchObject({ hasCultivation: true, metrcPushStatus: { queuedCount: 0, failedCount: 0, oldestIncompleteActivity: null } });
 
@@ -88,7 +90,7 @@ test("search-metrc-packages honours every filter, sorts and pages", () => {
   expect(labels(call("search-metrc-packages", { licenseId: lic, metrcIds: [one.metrcId] }))).toEqual([one.label]);
   expect(call("search-metrc-packages", { licenseId: lic, searchMetrcItem: "live resin", limit: 100 }).items.every((m: any) => /live resin/i.test(m.metrcItem.name))).toBe(true);
   expect(call("search-metrc-packages", { licenseId: lic, searchMetrcStrain: "jack", limit: 100 }).items.every((m: any) => m.strainName === "Jack Herer")).toBe(true);
-  expect(call("search-metrc-packages", { licenseId: license(world, "CULTIVATION"), searchMetrcCategory: "buds" }).totalCount).toBe(4);
+  expect(call("search-metrc-packages", { licenseId: license(world, "CULTIVATION"), searchMetrcCategory: "buds" }).totalCount).toBe(3);
   expect(call("search-metrc-packages", { licenseId: license(world, "CULTIVATION"), labTestingStates: ["NotSubmitted"] }).totalCount).toBe(2);
 
   const processing = call("search-metrc-locations", { licenseId: lic, search: "processing" }).items[0];
@@ -106,13 +108,18 @@ test("search-metrc-packages honours every filter, sorts and pages", () => {
 test("yesterday's Metrc adjustments: one of them failed, with its error and package label", () => {
   const { call, world } = bench();
   const yesterday = call("search-metrc-activities", { createdDateAfter: YESTERDAY, createdDateBefore: YESTERDAY, limit: 100 });
-  expect(yesterday.totalCount).toBe(8);
+  expect(yesterday.totalCount).toBe(7);
   const adjustments = yesterday.items.filter((a: any) => a.type === "ADJUST_PACKAGE");
-  expect(adjustments).toHaveLength(5);
+  expect(adjustments).toHaveLength(4);
   const failed = adjustments.filter((a: any) => a.status === "FAILED");
   expect(failed).toHaveLength(1);
   expect(failed[0].lastError).toContain("more than the package holds");
-  expect(adjustments.filter((a: any) => a.status === "COMPLETED")).toHaveLength(4);
+  expect(adjustments.filter((a: any) => a.status === "COMPLETED")).toHaveLength(2);
+  // What was queued after the failure waits behind it.
+  const behind = adjustments.filter((a: any) => a.status === "QUEUED");
+  expect(behind).toHaveLength(1);
+  expect(behind[0].insertedAt > failed[0].insertedAt).toBe(true);
+  expect(behind[0].lastError).toBeNull();
   expect(yesterday.items.map((a: any) => a.type)).toContain("CHANGE_PACKAGE_LOCATION");
   for (const a of yesterday.items) {
     expect(a.package.metrcLabel).toBe(world.packages.find((k) => k.id === a.package.id)!.metrcLabel);
@@ -120,10 +127,14 @@ test("yesterday's Metrc adjustments: one of them failed, with its error and pack
   }
 
   const failures = call("search-metrc-activities", { statuses: ["FAILED"] });
-  expect(failures.items.map((a: any) => a.insertedAt.slice(0, 10))).toEqual([YESTERDAY, addDays(TODAY, -2)]);
+  // A license has at most one FAILED activity: a failure holds back every later one.
+  expect(failures.items.map((a: any) => a.insertedAt.slice(0, 10))).toEqual([YESTERDAY]);
   const queued = call("search-metrc-activities", { statuses: ["QUEUED"] }).items;
-  expect(queued.map((a: any) => [a.type, a.insertedAt.slice(0, 10)])).toEqual([["ADJUST_PACKAGE", TODAY]]);
-  expect(call("search-metrc-activities", { createdDateAfter: YESTERDAY, createdDateBefore: YESTERDAY, statuses: ["FAILED", "QUEUED"] }).totalCount).toBe(1);
+  expect(queued.map((a: any) => [a.type, a.insertedAt.slice(0, 10)])).toEqual([["ADJUST_PACKAGE", TODAY], ["CHANGE_PACKAGE_LOCATION", YESTERDAY], ["ADJUST_PACKAGE", YESTERDAY]]);
+  expect(call("search-metrc-activities", { createdDateAfter: YESTERDAY, createdDateBefore: YESTERDAY, statuses: ["FAILED", "QUEUED"] }).totalCount).toBe(3);
+  // The day before, everything went through.
+  const dayBefore = addDays(TODAY, -2);
+  expect(call("search-metrc-activities", { createdDateAfter: dayBefore, createdDateBefore: dayBefore }).items.every((a: any) => a.status === "COMPLETED")).toBe(true);
 });
 
 test("search-metrc-activities honours every filter, sorts and pages", () => {
@@ -142,9 +153,9 @@ test("search-metrc-activities honours every filter, sorts and pages", () => {
   expect(call("search-metrc-activities", { packageIds: [one.package.id] }).items.every((a: any) => a.package.id === one.package.id)).toBe(true);
   const lena = call("search-metrc-activities", { creatorIds: ["usr_5"], limit: 100 });
   expect(lena.items.every((a: any) => a.creator.profile.fullName === "Lena Hartmann")).toBe(true);
-  expect(lena.totalCount).toBe(8);
+  expect(lena.totalCount).toBe(7);
   expect(call("search-metrc-activities", { licenseIds: [license(world, "CULTIVATION")] }).totalCount).toBe(0);
-  expect(call("search-metrc-activities", { createdDateAfter: `${YESTERDAY}T12:00:00-08:00`, createdDateBefore: `${YESTERDAY}T23:59:59-08:00` }).totalCount).toBe(4);
+  expect(call("search-metrc-activities", { createdDateAfter: `${YESTERDAY}T12:00:00-08:00`, createdDateBefore: `${YESTERDAY}T23:59:59-08:00` }).totalCount).toBe(3);
 
   expect(error("search-metrc-activities", { createdDateAfter: "yesterday" })).toContain("tool_error");
   expect(error("search-metrc-activities", { creatorIds: ["lic_1"] })).toContain("tool_error");
@@ -217,4 +228,18 @@ test("search-metrc-locations lists the rooms of each license, by name", () => {
   expect(call("search-metrc-locations", { search: "quarantine" }).items).toMatchObject([{ name: "Quarantine", license: { id: world.metrcPackages[0]!.licenseId } }]);
 
   expect(error("search-metrc-locations", { licenseId: "usr_1" })).toContain("tool_error");
+});
+
+test("every imported Metrc package is a Distru package, on both licenses", () => {
+  const { call, world } = bench();
+  for (const kind of ["DISTRIBUTION", "CULTIVATION"] as const) {
+    const lic = license(world, kind);
+    const imported = call("search-metrc-packages", { licenseId: lic, importStatus: "IMPORTED", limit: 100 }).items;
+    expect(imported.length).toBeGreaterThan(0);
+    expect(imported.every((m: any) => m.package?.metrcLabel === m.label)).toBe(true);
+    expect(call("search-metrc-packages", { licenseId: lic, importStatus: "UNIMPORTED", limit: 100 }).items.every((m: any) => m.package === null)).toBe(true);
+  }
+  const cult = call("search-metrc-packages", { licenseId: license(world, "CULTIVATION"), importStatus: "IMPORTED" }).items;
+  expect(cult.map((m: any) => [m.metrcItem.name, m.package.product.name, m.unitType.name, m.metrcLocation.name])).toEqual([["Gelato Bulk Flower", "Gelato Bulk Flower", "Gram", "Dry Room"]]);
+  expect(call("search-metrc-packages", { licenseId: license(world, "CULTIVATION"), importStatus: "UNIMPORTED" }).totalCount).toBe(2);
 });

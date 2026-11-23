@@ -1,9 +1,10 @@
 // What stock is worth and what sold stock cost: the inventory valuation and cost of goods sold reports.
-import { addDays, bound, matches, money, normalizeIds, qty, report, within } from "../../../src/core/kit.ts";
+import { bound, closeness, describeRanges, lastDays, money, normalizeIds, qty, report, within, type DateSpan } from "../../../src/core/kit.ts";
 import { defineTool } from "../../../src/core/tool.ts";
-import { activeQuantity, availableQuantity, PREFIX, type Id, type Product, type SalesOrder, type World } from "../world.ts";
-import { named, stamp, type C } from "./shared.ts";
-import { categoryOf, companyName, PRODUCT_FILTERS, productFilter, productOf, subcategoryOf, unitTypeOf, type ProductFilters } from "./inventory.ts";
+import { activeQuantity, availableQuantity, incomingQuantity, passedTestingQuantity, PREFIX, type Id, type Product, type SalesOrder, type World } from "../world.ts";
+import {
+  categoryOf, companyName, named, PRODUCT_FILTERS, productFilter, productOf, reportCustomFields, stamp, subcategoryName, unitTypeOf, type C, type ProductFilters,
+} from "./shared.ts";
 
 const columns = (pairs: [string, string][]) => pairs.map(([key, label]) => ({ key, label }));
 const sum = (ns: number[]) => ns.reduce((n, x) => n + x, 0);
@@ -22,25 +23,19 @@ function stockOf(w: World, p: Product, locationIds: Id[] | undefined) {
   const active = locationIds ? sum(locationIds.map((l) => activeQuantity(w, p, l))) : activeQuantity(w, p);
   // Reservations are held per product, not per location, so a location filter still takes all of them off.
   const available = locationIds ? active - p.reserved : availableQuantity(w, p);
-  const passedTesting = p.tracking === "PACKAGE"
-    ? sum(w.packages.filter((k) => k.productId === p.id && k.status === "ACTIVE" && k.labTestingState === "TestPassed" && (!locationIds || locationIds.includes(k.locationId))).map((k) => k.quantity))
-    : null;
-  // A purchase order that is not COMPLETED counts in full: the world does not record partial receipts.
-  const incoming = sum(w.purchaseOrders.filter((po) => po.status !== "COMPLETED" && (!locationIds || locationIds.includes(po.locationId)))
-    .flatMap((po) => po.items).filter((i) => i.productId === p.id).map((i) => i.quantity));
-  return { active, available, passedTesting, incoming };
+  return { active, available, passedTesting: passedTestingQuantity(w, p, locationIds), incoming: incomingQuantity(w, p, locationIds) };
 }
 
 function valuationRow(w: World, p: Product, stock: ReturnType<typeof stockOf>, method: "COST" | "PRICE") {
   return {
     name: p.name, productId: p.id, sku: p.sku, vendor: companyName(w, p.vendorId) ?? "", vendorId: p.vendorId ?? "", unitType: unitTypeOf(w, p).name,
-    category: categoryOf(w, p), subcategory: subcategoryOf(w, p), group: named(w.groups, p.groupId)?.name ?? null, owner: null,
+    category: categoryOf(w, p).name, subcategory: subcategoryName(w, p), group: named(w.groups, p.groupId)?.name ?? null, owner: null,
     activeQuantity: qty(stock.active), activeQuantityPassedTesting: stock.passedTesting === null ? null : qty(stock.passedTesting),
     assemblingQuantity: "0", reservedQuantity: qty(p.reserved), availableQuantity: qty(stock.available), incomingQuantity: qty(stock.incoming), pendingOutputQuantity: "0",
     unitCost: money(p.unitCost), unitPrice: money(p.unitPrice),
     inventoryThresholdMax: p.thresholdMax === null ? null : qty(p.thresholdMax), inventoryThresholdMin: p.thresholdMin === null ? null : qty(p.thresholdMin),
     activeValue: money(stock.active * (method === "PRICE" ? p.unitPrice : p.unitCost)),
-    imageUrl: null, brand: companyName(w, p.brandId), brandId: p.brandId, customFields: [],
+    imageUrl: null, brand: companyName(w, p.brandId), brandId: p.brandId, customFields: reportCustomFields(w, "PRODUCT"),
   };
 }
 
@@ -54,7 +49,6 @@ const COGS_COLUMNS = columns([
   ["profitUnitActual", "Profit per unit (actual)"], ["profitUnitDefault", "Profit per unit (default)"], ["marginActual", "Margin (actual)"], ["marginDefault", "Margin (default)"],
 ]);
 
-type Range = { start?: string; end?: string };
 type Item = SalesOrder["items"][0];
 
 /** Cost, profit and margin of a line at one unit cost. */
@@ -74,18 +68,19 @@ function cogsRow(w: World, o: SalesOrder, item: Item) {
   const actual = figures(item, item.unitCost), standard = figures(item, p.unitCost);
   return {
     orderNumber: o.orderNumber, salesOrderId: o.id, finalInput: "Final", costOrigin: null,
-    productName: p.name, productId: p.id, sku: p.sku, productBrand: companyName(w, p.brandId), brandId: p.brandId, productCategory: categoryOf(w, p),
+    productName: p.name, productId: p.id, sku: p.sku, productBrand: companyName(w, p.brandId), brandId: p.brandId, productCategory: categoryOf(w, p).name,
     package: pkg?.metrcLabel ?? null, packageId: pkg?.id ?? null,
     // A batch's name is its batch number in this world, so the number is not repeated in parentheses.
     batch: batch?.batchNumber ?? null, batchId: batch?.id ?? null,
     quantity: qty(item.quantity), unitType: unitTypeOf(w, p).name, unitPrice: money(item.unitPrice), totalPrice: money(item.quantity * item.unitPrice),
     unitCostActual: actual.unitCost, unitCostDefault: standard.unitCost, totalCostActual: actual.totalCost, totalCostDefault: standard.totalCost,
     totalProfitsActual: actual.totalProfits, totalProfitsDefault: standard.totalProfits, profitUnitActual: actual.profitUnit, profitUnitDefault: standard.profitUnit,
-    marginActual: actual.margin, marginDefault: standard.margin, customFields: [],
+    marginActual: actual.margin, marginDefault: standard.margin, customFields: reportCustomFields(w, "SALES_ORDER"),
   };
 }
 
-const span = (what: string, r: Range | undefined) => (r ? `${what} ${r.start ?? "any time"} to ${r.end ?? "now"}` : null);
+/** search on the valuation report: a substring of the product's name or SKU, or its name within a typo. */
+const valuationMatches = (search: string | undefined, p: Product) => !search || closeness(search, [p.sku], [p.name]) !== undefined;
 
 // ---------- the tools ----------
 
@@ -95,7 +90,7 @@ export const tools = [
     supports: ["cursor", "calculationMethod", "locationIds", "search", ...PRODUCT_FILTERS, "maxRowsLimit"],
     run(args: ProductFilters & { cursor?: string; calculationMethod?: "COST" | "PRICE"; locationIds?: string[]; search?: string; maxRowsLimit?: number }, c: C) {
       const w = c.world, locationIds = normalizeIds(args.locationIds, PREFIX.location), ofKind = productFilter(w, args);
-      const rows = w.products.filter((p) => p.active && ofKind(p) && matches(args.search, p.name, p.sku))
+      const rows = w.products.filter((p) => p.active && ofKind(p) && valuationMatches(args.search, p))
         .map((p) => ({ p, stock: stockOf(w, p, locationIds) }))
         .sort((a, b) => b.stock.available - a.stock.available)
         .map(({ p, stock }) => valuationRow(w, p, stock, args.calculationMethod ?? "PRICE"));
@@ -106,17 +101,16 @@ export const tools = [
   defineTool<World>({
     name: "report-cogs",
     supports: ["cursor", "deliveryDatetime", "orderDatetime", ...PRODUCT_FILTERS, "maxRowsLimit"],
-    run(args: ProductFilters & { cursor?: string; deliveryDatetime?: Range; orderDatetime?: Range; maxRowsLimit?: number }, { world: w }) {
+    run(args: ProductFilters & { cursor?: string; deliveryDatetime?: DateSpan; orderDatetime?: DateSpan; maxRowsLimit?: number }, { world: w }) {
       const tz = w.timezone, ofKind = productFilter(w, args);
-      // The last 30 days, today included, unless a delivery range is sent.
-      const ordered = args.orderDatetime ?? (args.deliveryDatetime ? undefined : { start: addDays(w.today, -29), end: w.today });
+      const ordered = args.orderDatetime ?? (args.deliveryDatetime ? undefined : lastDays(w.today));
       const orderedIn = [bound(ordered?.start, "after", tz), bound(ordered?.end, "before", tz)] as const;
       const deliveredIn = [bound(args.deliveryDatetime?.start, "after", tz), bound(args.deliveryDatetime?.end, "before", tz)] as const;
       const rows = w.salesOrders
         .filter((o) => o.status === "COMPLETED" && within(o.orderDatetime, ...orderedIn) && within(o.deliveryDatetime, ...deliveredIn))
         .sort((a, b) => Date.parse(a.orderDatetime) - Date.parse(b.orderDatetime))
         .flatMap((o) => o.items.filter((i) => ofKind(productOf(w, i.productId))).map((i) => cogsRow(w, o, i)));
-      const dateRange = [span("ordered", ordered), span("delivered", args.deliveryDatetime)].filter((s) => s !== null).join("; ");
+      const dateRange = describeRanges([["orderDatetime", ordered], ["deliveryDatetime", args.deliveryDatetime]]);
       return report({ report: "Cost of goods sold", dateRange, columns: COGS_COLUMNS }, rows, args);
     },
   }),

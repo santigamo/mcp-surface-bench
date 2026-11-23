@@ -5,7 +5,8 @@ export type Id = string;
 export type Named = { id: Id; name: string };
 
 export type User = { id: Id; firstName: string; lastName: string; email: string; role: string };
-export type License = { id: Id; licenseNumber: string; name: string; kind: "DISTRIBUTION" | "CULTIVATION"; complianceType: "METRC"; active: boolean };
+/** One of the company's own state licenses. `expiryDate` is YYYY-MM-DD. */
+export type License = { id: Id; licenseNumber: string; name: string; kind: "DISTRIBUTION" | "CULTIVATION"; complianceType: "METRC"; active: boolean; expiryDate: string };
 export type Location = { id: Id; name: string; licenseId: Id };
 
 export type Category = Named & {
@@ -87,6 +88,10 @@ export type Product = {
   updatedAt: string;
 };
 
+/**
+ * A lot of a product. A batch-tracked product holds its stock in its batches' `stock`; a package-tracked product's
+ * batch holds none itself, its stock is in the packages that point at it (see `batchStock`).
+ */
 export type Batch = {
   id: Id;
   productId: Id;
@@ -99,6 +104,7 @@ export type Batch = {
 export type Package = {
   id: Id;
   productId: Id;
+  batchId: Id;
   metrcLabel: string;
   quantity: number;
   locationId: Id;
@@ -115,7 +121,10 @@ export type StockTransfer = {
   toLocationId: Id;
   items: { productId: Id; batchId: Id | null; quantity: number }[];
   description: string | null;
+  /** The date the transfer shows, which the caller may set. */
   transferDatetime: string;
+  /** When its stock arrived: transfers complete at once, when they are recorded. */
+  completedAt: string;
 };
 
 export type OrderStatus = "PENDING" | "PROCESSING" | "READY_TO_SHIP" | "DELIVERING" | "DELIVERED" | "COMPLETED" | "CANCELED";
@@ -147,7 +156,18 @@ export type Invoice = {
   voided: boolean;
 };
 
-export type Payment = { id: Id; amount: number; paymentDatetime: string; paymentMethodId: Id; note: string | null; voided: boolean };
+export type Payment = {
+  id: Id;
+  paymentNumber: string;
+  amount: number;
+  /** When the money was paid or received. */
+  paymentDatetime: string;
+  /** When the payment was entered in Distru. */
+  recordedAt: string;
+  paymentMethodId: Id;
+  note: string | null;
+  voidedAt: string | null;
+};
 export type InvoicePayment = Payment & { invoiceId: Id };
 export type PurchasePayment = Payment & { purchaseId: Id };
 
@@ -216,7 +236,7 @@ export type MetrcPackage = {
 
 export type MetrcActivity = {
   id: Id;
-  type: "ADJUST_PACKAGE" | "MOVE_PACKAGE" | "CREATE_PACKAGE" | "FINISH_PACKAGE";
+  type: "ADJUST_PACKAGE" | "CHANGE_PACKAGE_LOCATION" | "CREATE_PACKAGE" | "FINISH_PACKAGE";
   title: string;
   description: string;
   status: "QUEUED" | "FAILED" | "COMPLETED";
@@ -240,7 +260,8 @@ export type MetrcManifest = {
   packages: { label: string; itemName: string; itemCategory: string; quantity: number; unitOfMeasure: string; labTestingState: string }[];
 };
 
-export type PlantGroup = { id: Id; name: string; strainName: string; licenseId: Id; locationId: Id; active: boolean; plantedAt: string };
+/** A plant group (Metrc plant batch). Whether it is active is derived from its plants: see `plantGroupActive`. */
+export type PlantGroup = { id: Id; name: string; strainName: string; licenseId: Id; locationId: Id; plantedAt: string };
 export type Plant = {
   id: Id;
   metrcLabel: string;
@@ -265,7 +286,33 @@ export type Harvest = {
   plantCount: number;
 };
 
-/** One thing somebody (or some system) did, with the records it touched. Feeds record history and the activity feed. */
+/**
+ * The records the world logs changes to, by the documented type (`records[].type` of search-activity; all but
+ * CUSTOM_FIELD are also `recordType`s of get-record-history).
+ */
+export type RecordType =
+  | "COMPANY" | "COMPANY_GROUP" | "COMPLIANCE_TRANSFER" | "CUSTOM_FIELD" | "INVOICE" | "MENU" | "PAYMENT_METHOD" | "PRODUCT" | "PRODUCT_CATEGORY"
+  | "PRODUCT_GROUP" | "PURCHASE" | "SALES_ORDER" | "STOCK_TRANSFER" | "TAG";
+
+/** What a logged row is (`rows[].entity` of get-record-history): the record itself, or one of its lines. */
+export type RowEntity = RecordType | "CONTACT" | "INVOICE_RECIPIENT_EMAIL" | "ORDER_ITEM" | "PRODUCT_SUBCATEGORY" | "PRODUCT_TAG" | "PURCHASE_PAYMENT" | "STOCK_TRANSFER_ITEM";
+
+/** One row an action wrote: a row of the record `type`/`id` (its own, or one of its lines), which shows in that record's history. */
+export type ActionRow = {
+  type: RecordType;
+  id: Id;
+  /** The record's name when the action ran. */
+  name: string;
+  entity: RowEntity;
+  /** The row's own id, when the world has one: the record's id for its own row, the line's id for a line. */
+  rowId: Id | null;
+  op: "INSERT" | "UPDATE" | "DELETE";
+  /** What a line is (a product, a contact's name); null on the record's own row. */
+  rowLabel: string | null;
+  fields: { field: string; label: string; oldValue: string | null; newValue: string | null }[];
+};
+
+/** One thing somebody (or some system) did, with the rows it wrote. Feeds record history and the activity feed. */
 export type Action = {
   id: Id;
   changedAt: string;
@@ -274,16 +321,7 @@ export type Action = {
   actorName: string;
   source: "WEB" | "PUBLIC_API" | "MCP" | "AUTOMATION" | "METRC" | "QUICKBOOKS" | "MOBILE";
   sourceDetail: string | null;
-  records: {
-    /** `SALES_ORDER`, `PRODUCT`, `COMPANY`, ... */
-    type: string;
-    id: Id;
-    name: string;
-    op: "INSERT" | "UPDATE" | "DELETE";
-    /** For an order item or other child row: what the row is. */
-    rowLabel: string | null;
-    fields: { field: string; label: string; oldValue: string | null; newValue: string | null }[];
-  }[];
+  records: ActionRow[];
 };
 
 export type SentEmail = { document: string; recordId: Id; emailAddresses: string[]; sentAt: string };
@@ -292,7 +330,7 @@ export type World = {
   /** The day the run happens, YYYY-MM-DD in the company timezone. */
   today: string;
   timezone: string;
-  company: { id: Id; name: string; state: string; complianceSystem: "METRC" };
+  company: { id: Id; name: string; legalName: string; state: string; complianceSystem: "METRC" };
   /** The signed-in user. */
   me: Id;
   users: User[];
@@ -337,13 +375,51 @@ export type World = {
 
 export const fullName = (u: { firstName: string; lastName: string | null }) => (u.lastName ? `${u.firstName} ${u.lastName}` : u.firstName);
 
-/** Units on hand, across locations. */
-export function activeQuantity(w: World, p: Product, locationId?: Id): number {
-  const at = (rows: { locationId: Id; quantity: number }[]) => rows.filter((r) => !locationId || r.locationId === locationId).reduce((n, r) => n + r.quantity, 0);
-  if (p.tracking === "PRODUCT") return at(p.stock);
-  if (p.tracking === "BATCH") return w.batches.filter((b) => b.productId === p.id).reduce((n, b) => n + at(b.stock), 0);
-  return at(w.packages.filter((k) => k.productId === p.id && k.status === "ACTIVE"));
+type StockRow = { locationId: Id; quantity: number };
+const at = (rows: StockRow[], locationId?: Id) => rows.filter((r) => !locationId || r.locationId === locationId).reduce((n, r) => n + r.quantity, 0);
+
+/** Stock rows per location: the same location's rows added up, in the order the locations first appear. */
+function perLocation(rows: StockRow[]): StockRow[] {
+  const out: StockRow[] = [];
+  for (const r of rows) {
+    const row = out.find((x) => x.locationId === r.locationId);
+    if (row) row.quantity += r.quantity;
+    else out.push({ locationId: r.locationId, quantity: r.quantity });
+  }
+  return out;
 }
+
+const productOfBatch = (w: World, b: Batch) => w.products.find((p) => p.id === b.productId)!;
+
+/** A batch's stock per location: its own rows for a batch-tracked product, its active packages' for a package-tracked one. */
+export function batchStock(w: World, b: Batch): StockRow[] {
+  if (productOfBatch(w, b).tracking !== "PACKAGE") return b.stock;
+  return perLocation(w.packages.filter((k) => k.batchId === b.id && k.status === "ACTIVE"));
+}
+
+/** Units on hand, across locations or at one. A package-tracked product counts its packages, never its batches' rows. */
+export function activeQuantity(w: World, p: Product, locationId?: Id): number {
+  if (p.tracking === "PRODUCT") return at(p.stock, locationId);
+  if (p.tracking === "BATCH") return w.batches.filter((b) => b.productId === p.id).reduce((n, b) => n + at(b.stock, locationId), 0);
+  return at(w.packages.filter((k) => k.productId === p.id && k.status === "ACTIVE"), locationId);
+}
+
+/** The part of the active quantity held in packages whose lab test passed; null for batch- and product-tracked products. */
+export function passedTestingQuantity(w: World, p: Product, locationIds?: Id[]): number | null {
+  if (p.tracking !== "PACKAGE") return null;
+  return w.packages
+    .filter((k) => k.productId === p.id && k.status === "ACTIVE" && k.labTestingState === "TestPassed" && (!locationIds || locationIds.includes(k.locationId)))
+    .reduce((n, k) => n + k.quantity, 0);
+}
+
+/**
+ * Units on purchase orders not yet received, drafts included, for the orders received at `locationIds` or anywhere.
+ * The world keeps no partial receipts, so every order that is not COMPLETED counts in full.
+ */
+export const incomingQuantity = (w: World, p: Product, locationIds?: Id[]) =>
+  w.purchaseOrders
+    .filter((o) => o.status !== "COMPLETED" && (!locationIds || locationIds.includes(o.locationId)))
+    .flatMap((o) => o.items).filter((i) => i.productId === p.id).reduce((n, i) => n + i.quantity, 0);
 
 /** Units that can still be sold: on hand minus what open orders hold. */
 export const availableQuantity = (w: World, p: Product) => activeQuantity(w, p) - p.reserved;
@@ -359,19 +435,47 @@ export const purchaseTotal = (p: PurchaseOrder) => round2(p.items.reduce((n, i) 
 export type PaymentStatus = "NOT_PAID" | "PARTIALLY_PAID" | "PAID" | "OVER_PAID";
 const statusOf = (total: number, paid: number): PaymentStatus => (paid <= 0 ? "NOT_PAID" : paid < total - 0.005 ? "PARTIALLY_PAID" : paid > total + 0.005 ? "OVER_PAID" : "PAID");
 
-export function invoiceMoney(w: World, inv: Invoice) {
+/** The sum of the payments that are not voided. */
+const posted = (payments: Payment[]) => round2(payments.filter((p) => p.voidedAt === null).reduce((n, p) => n + p.amount, 0));
+
+export type Money = { total: number; paid: number; remaining: number; status: PaymentStatus };
+
+export function invoiceMoney(w: World, inv: Invoice): Money {
   const order = w.salesOrders.find((o) => o.id === inv.salesOrderId)!;
   const total = orderTotal(order);
-  const paid = round2(w.invoicePayments.filter((p) => p.invoiceId === inv.id && !p.voided).reduce((n, p) => n + p.amount, 0));
+  const paid = posted(w.invoicePayments.filter((p) => p.invoiceId === inv.id));
   // A voided invoice owes nothing.
   const remaining = inv.voided ? 0 : round2(Math.max(0, total - paid));
   return { total, paid, remaining, status: statusOf(total, paid) };
 }
 
-export function purchaseMoney(w: World, po: PurchaseOrder) {
+/** What an order has been paid: its invoice's payments, or nothing before it is invoiced. */
+export function orderMoney(w: World, o: SalesOrder): Money {
+  const inv = w.invoices.find((i) => i.salesOrderId === o.id);
+  if (inv) return invoiceMoney(w, inv);
+  const total = orderTotal(o);
+  return { total, paid: 0, remaining: o.status === "CANCELED" ? 0 : total, status: "NOT_PAID" };
+}
+
+export function purchaseMoney(w: World, po: PurchaseOrder): Money {
   const total = purchaseTotal(po);
-  const paid = round2(w.purchasePayments.filter((p) => p.purchaseId === po.id && !p.voided).reduce((n, p) => n + p.amount, 0));
+  const paid = posted(w.purchasePayments.filter((p) => p.purchaseId === po.id));
   return { total, paid, remaining: round2(Math.max(0, total - paid)), status: statusOf(total, paid) };
+}
+
+/** A payment's last change: when it was voided, else when it was recorded. Payments are not edited otherwise. */
+export const paymentUpdatedAt = (p: Payment) => p.voidedAt ?? p.recordedAt;
+
+/** A plant group is active while it has immature plants, as the documentation defines it. */
+export const plantGroupActive = (w: World, g: PlantGroup) => w.plants.some((p) => p.plantGroupId === g.id && p.status === "IMMATURE");
+
+/**
+ * When a record or a line last changed: the latest of its own instants and of the actions that wrote a row of it.
+ * A record is named by its type (a SALES_ORDER and its lines), a line by its entity and row id (a CONTACT).
+ */
+export function lastChanged(w: World, type: RowEntity, id: Id, ...instants: (string | null)[]): string {
+  const logged = w.actions.filter((a) => a.records.some((r) => (r.type === type && r.id === id) || (r.entity === type && r.rowId === id))).map((a) => a.changedAt);
+  return [...instants, ...logged].filter((x): x is string => x !== null).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
 }
 
 /** A fresh id for a new record, e.g. `con_31`. */

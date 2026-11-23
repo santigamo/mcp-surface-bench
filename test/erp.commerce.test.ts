@@ -105,7 +105,8 @@ test("search-menu-products honours every filter, the sort and filterOptions", ()
   const menu = menuId(world, "Main Wholesale Menu");
   const product = (name: string) => world.products.find((p) => p.name === name)!;
 
-  expect(names(allProducts(call, { menuId: menu, search: "gelato" }))).toEqual(["Gelato 3.5g", "Gelato Infused Pre-Roll", "Gelato Cartridge 1g", "Gelato Live Resin 1g"]);
+  // Name matches rank by how closely the name matches: the shortest name holding the term first.
+  expect(names(allProducts(call, { menuId: menu, search: "gelato" }))).toEqual(["Gelato 3.5g", "Gelato Cartridge 1g", "Gelato Live Resin 1g", "Gelato Infused Pre-Roll"]);
   // Search also reaches the strain type and the SKU.
   expect(names(allProducts(call, { menuId: menu, search: "indica" })).sort()).toEqual(["OG Kush 3.5g", "OG Kush Cartridge 0.5g", "Wedding Cake 1g Pre-Roll", "Wedding Cake 3.5g", "Wedding Cake Live Rosin 1g"]);
   expect(allProducts(call, { menuId: menu, search: "fl-" }).totalCount).toBe(5);

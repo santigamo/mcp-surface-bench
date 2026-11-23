@@ -69,11 +69,11 @@ test("report-inventory-valuation narrows stock by location and rows by product",
   const both = call("report-inventory-valuation", { locationIds: ["loc_1", "loc_2"], search: "ED-1024" }).rows[0];
   expect(both.activeQuantity).toBe(String(activeQuantity(w, gummies)));
   // Every product keeps its row when a location holds none of it.
-  expect(call("report-inventory-valuation", { locationIds: ["loc_6"] }).rows.every((x: any) => x.activeQuantity === "0")).toBe(true);
+  expect(call("report-inventory-valuation", { locationIds: ["loc_5"] }).rows.every((x: any) => x.activeQuantity === "0")).toBe(true);
 
   const [flower, prerolls] = w.categories as [World["categories"][0], World["categories"][0]];
   const rows = (args: Record<string, unknown>) => call("report-inventory-valuation", args).rows.map((x: any) => x.name).sort();
-  expect(rows({ productCategoryIds: [flower.id] })).toHaveLength(8);
+  expect(rows({ productCategoryIds: [flower.id] })).toHaveLength(9); // the eight packaged flower products and the bulk flower
   expect(rows({ productCategoryIds: [flower.id], productSubcategoryIds: [flower.subcategories[1]!.id] })).toEqual(["Blue Dream 7g", "Wedding Cake 7g"]);
   expect(rows({ productSubcategoryIds: [prerolls.subcategories[2]!.id] })).toEqual(["Gelato Infused Pre-Roll", "OG Kush Infused Pre-Roll", "Sour Diesel Infused Pre-Roll"]);
   expect(rows({ productTagIds: [w.tags.find((t) => t.name === "Summer promo")!.id] })).toEqual(["Blue Dream Pre-Roll 5-Pack", "Mango Gummies 100mg"]);
@@ -103,7 +103,7 @@ test("report-cogs answers the margin by product category last quarter", () => {
   expect(w.salesOrders.some((o) => o.status === "CANCELED" && within(o.orderDatetime, after, before))).toBe(true);
 
   const r = call("report-cogs", { orderDatetime: q });
-  expect(r.meta).toMatchObject({ report: "Cost of goods sold", dateRange: "ordered 2026-07-01 to 2026-09-30", rowLimit: 500, rowCount: lines.length, totalRowCount: lines.length, truncated: false });
+  expect(r.meta).toMatchObject({ report: "Cost of goods sold", dateRange: "orderDatetime 2026-07-01 to 2026-09-30", rowLimit: 500, rowCount: lines.length, totalRowCount: lines.length, truncated: false });
   expect(r.nextCursor).toBeUndefined();
   expect(new Set(r.rows.map((x: any) => x.salesOrderId))).toEqual(new Set(sold.map((o) => o.id)));
 
@@ -148,18 +148,18 @@ test("report-cogs keeps Default on the product's configured cost", () => {
 test("report-cogs defaults to the last 30 days, and a delivery range lifts that default", () => {
   const { call, world: w } = bench();
   const recent = call("report-cogs");
-  expect(recent.meta.dateRange).toBe("ordered 2026-10-25 to 2026-11-23");
+  expect(recent.meta.dateRange).toBe("orderDatetime 2026-10-25 to 2026-11-23");
   const start = bound("2026-10-25", "after", w.timezone)!;
   const expected = w.salesOrders.filter((o) => o.status === "COMPLETED" && Date.parse(o.orderDatetime) >= start).flatMap((o) => o.items).length;
   expect(recent.meta.totalRowCount).toBe(expected);
   expect(call("report-cogs", { orderDatetime: { start: "2026-10-25", end: "2026-11-23" } }).rows).toEqual(recent.rows);
 
   const delivered = call("report-cogs", { deliveryDatetime: { start: "2026-07-01T00:00:00-07:00", end: "2026-09-30" } });
-  expect(delivered.meta.dateRange).toBe("delivered 2026-07-01T00:00:00-07:00 to 2026-09-30");
+  expect(delivered.meta.dateRange).toBe("deliveryDatetime 2026-07-01T00:00:00-07:00 to 2026-09-30");
   const deliveredIn = w.salesOrders.filter((o) => o.status === "COMPLETED" && within(o.deliveryDatetime, bound("2026-07-01", "after", w.timezone), bound("2026-09-30", "before", w.timezone)));
   expect(delivered.meta.totalRowCount).toBe(deliveredIn.flatMap((o) => o.items).length);
   const both = call("report-cogs", { orderDatetime: { start: "2026-09-01" }, deliveryDatetime: { end: "2026-09-30" } });
-  expect(both.meta.dateRange).toBe("ordered 2026-09-01 to now; delivered any time to 2026-09-30");
+  expect(both.meta.dateRange).toBe("orderDatetime 2026-09-01 to any; deliveryDatetime any to 2026-09-30");
   expect(both.rows.length).toBeGreaterThan(0);
   expect(both.rows.every((x: any) => deliveredIn.some((o) => o.id === x.salesOrderId && o.orderDatetime >= "2026-09-01"))).toBe(true);
 });
