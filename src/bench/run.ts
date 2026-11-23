@@ -6,7 +6,8 @@ import { loadCatalog } from "../catalog/index.ts";
 import { SURFACES } from "../surfaces/index.ts";
 import { clientNames, loadClient } from "./client.ts";
 import { execute } from "./execute.ts";
-import { localDate, parseOptions } from "./options.ts";
+import { dayIn } from "../core/kit.ts";
+import { machineDate, machineTimezone, parseOptions } from "./options.ts";
 import { plan } from "./plan.ts";
 import { gitState, runtime } from "./provenance.ts";
 import { renderReport, runLine } from "./render.ts";
@@ -23,8 +24,11 @@ const attempt = <T>(f: () => T): T => { try { return f(); } catch (e) { return s
 const options = attempt(() => parseOptions(process.argv.slice(2), { surfaces: Object.keys(SURFACES), clients: clientNames() }));
 const root = resultsDir(options.label);
 const previous = attempt(() => readMeta(root));
-const today = previous?.today ?? localDate();
-if (localDate() !== today) stop(`${root} was started on ${today} and today is ${localDate()}: the client would tell the model a different date than the world was built for. Use a new --label.`);
+// The user is where the company is: the clients run in the suite's timezone, and the world is built for the date there.
+const timezone = suite.timezone;
+const dateThere = () => dayIn(timezone, new Date());
+const today = previous?.today ?? dateThere();
+if (dateThere() !== today) stop(`${root} was started on ${today} and today is ${dateThere()} (${timezone}): the client would tell the model a different date than the world was built for. Use a new --label.`);
 const seed = options.seed ?? previous?.options.seed ?? Math.floor(Math.random() * 2 ** 31);
 
 // 2. The client, and whether it can run every arm here.
@@ -42,7 +46,7 @@ if (ungradable.length) stop(`The tasks cannot be graded on ${today}:`, ...ungrad
 // 4. Every surface the arms use starts, and its tool listing is measured.
 const listings: Record<string, Listing> = {};
 for (const surface of new Set(options.arms.map((a) => a.surface))) {
-  const { names: _, ...listing } = await listTools(serverSpec(surface, today)).catch((e: Error) => stop(`the ${surface} surface did not start: ${e.message}`));
+  const { names: _, ...listing } = await listTools(serverSpec(surface, today, timezone)).catch((e: Error) => stop(`the ${surface} surface did not start: ${e.message}`));
   listings[surface] = listing;
 }
 
@@ -52,6 +56,8 @@ const meta: Meta = {
   label: options.label,
   startedAt: new Date().toISOString(),
   today,
+  timezone,
+  machine: { timezone: machineTimezone(), date: machineDate() },
   options: { arms: options.arms.map((a) => a.name), client: client.name, model: options.model, effort: options.effort, tasks: tasks.map((t) => t.id), n: options.n, timeoutSeconds: options.timeoutSeconds, seed, prompt: options.prompt },
   arms: options.arms.map((a) => ({ ...a, setting: client.toolSearchSetting(a.toolSearch) })),
   client: { name: client.name, version: client.version(), setup: client.setup() },
@@ -72,10 +78,10 @@ if (previous) {
 const planned = plan(tasks, options.arms, options.n, seed);
 const todo = planned.filter((p) => !isFinished(root, p));
 const models = reportedModels(finished);
-console.log(`${root}\n${planned.length} runs planned, ${planned.length - todo.length} already finished; ${client.name} ${meta.client.version}, model ${options.model ?? "the client's default"}${models.length ? ` (ran ${models.join(", ")})` : ""}, effort ${options.effort ?? "the client's default"}, arms ${meta.options.arms.join(", ")}, today ${today}, seed ${seed}`);
-const setting = { root, today, client, model: options.model, effort: options.effort, timeoutSeconds: options.timeoutSeconds, before, git: meta.git };
+console.log(`${root}\n${planned.length} runs planned, ${planned.length - todo.length} already finished; ${client.name} ${meta.client.version}, model ${options.model ?? "the client's default"}${models.length ? ` (ran ${models.join(", ")})` : ""}, effort ${options.effort ?? "the client's default"}, arms ${meta.options.arms.join(", ")}, today ${today} (${timezone}; the machine says ${machineDate()}, ${machineTimezone()}), seed ${seed}`);
+const setting = { root, today, timezone, client, model: options.model, effort: options.effort, timeoutSeconds: options.timeoutSeconds, before, git: meta.git };
 for (const [i, p] of todo.entries()) {
-  if (localDate() !== today) { console.error(`The date changed to ${localDate()}; stopped with ${todo.length - i} runs left. They cannot finish under this label.`); process.exitCode = 3; break; }
+  if (dateThere() !== today) { console.error(`The date in ${timezone} changed to ${dateThere()}; stopped with ${todo.length - i} runs left. They cannot finish under this label.`); process.exitCode = 3; break; }
   const result = await execute(setting, p, options.prompt ? undefined : suite.tasks.find((t) => t.id === p.task));
   if (result.status === "limit") {
     console.error(`[${i + 1}/${todo.length}] ${p.task} ${p.arm} #${p.rep}: the client hit a usage or rate limit (${result.error ?? "no message"}). Stopped; ${todo.length - i} runs left. Run the same command to resume.`);

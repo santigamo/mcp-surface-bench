@@ -40,7 +40,12 @@ export type Task<W> = {
 
 export type Suite<W> = {
   name: string;
-  /** Builds the world as of `today` (YYYY-MM-DD). Deterministic: same day, same world. Plain JSON data only. */
+  /**
+   * Where the company is, as an IANA timezone ("America/Los_Angeles"). The user is there too: the runner starts the
+   * agent's client with TZ set to it, and a run's `today` is the date there, not on the machine running the benchmark.
+   */
+  timezone: string;
+  /** Builds the world as of `today` (YYYY-MM-DD, in `timezone`). Deterministic: same day, same world. Plain JSON data only. */
   createWorld(today: string): W;
   /** The instant "now" of a run on `today`. */
   clock(today: string): Date;

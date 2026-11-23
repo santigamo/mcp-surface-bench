@@ -215,7 +215,8 @@ export function placeOf(answer: string, at: number): { block: string; context: s
   const item = LIST_ITEM.exec(line);
   if (item) {
     const indent = item[1]!.length;
-    // The list runs up through items (blank lines between them included) to the line that introduces it.
+    // The list runs up through items (blank lines between them included) to the line that introduces it. A table row
+    // above a list is where the table ends, not an introduction: such a list has none.
     let up = row - 1;
     for (; up >= 0; up--) {
       const above = lines[up]!;
@@ -224,7 +225,8 @@ export function placeOf(answer: string, at: number): { block: string; context: s
       if (!nested || nested[1]!.length < indent) break;
     }
     const own = clauseText(line, column);
-    return { block: `list ${up}`, context: up >= 0 ? `${own} | ${lines[up]}` : own, own };
+    const intro = up >= 0 && !TABLE_ROW.test(lines[up]!) ? lines[up] : undefined;
+    return { block: `list ${up}`, context: intro ? `${own} | ${intro}` : own, own };
   }
   const clauses = clausesOf(line);
   const i = clauses.findLastIndex((c) => c.start <= column);
@@ -244,20 +246,28 @@ function clauseText(line: string, at: number): string {
   return kept.join(" ");
 }
 
-// ---------- what excuses a mention ----------
+// ---------- negative checks: what counts as presenting a wrong item as part of the answer ----------
+//
+// A negative check fails an answer that presents a wrong item as part of its answer. Whether a mention does depends on
+// where it is:
+// - in the part of the answer that gives the answer (`answerPart`: the tables, lists and clauses that give the right
+//   items), a wrong item counts unless its own row or item says explicitly that it is left out (`Excuse.states`);
+// - anywhere else (a remark, a note, another list), a mention counts only when its context says the item belongs to
+//   the answer (`Presenting.asserts`: "not imported", "still owes", "also overdue") and nothing there says it is left
+//   out (`Excuse.states`, or a plain fact that shows it, `Excuse.facts`).
+// A remark can mention a wrong item for any reason at all, so outside the answer the rule asks what the remark claims,
+// not whether it gave one of a list of reasons.
 
-/**
- * Words that turn a statement around, or make it a prospect rather than a fact, when they come just before it:
- * "not imported", "hasn't been paid in full", "waiting to be imported".
- */
-const NEGATED = String.raw`(?<!\b(?:not|never|no longer|hardly|isn't|aren't|wasn't|weren't|hasn't|haven't|doesn't|don't|didn't|won't|cannot|can't|to|can|could|should|must|will|would|may|might)\s+(?:(?:yet|been|be|really|fully|quite|actually|currently|even)\s+){0,2})`;
+/** Words that, just before a statement, turn it around or make it a prospect: "not imported", "hasn't been paid in full", "to be imported". */
+const NEGATORS = "not|never|no longer|hardly|isn't|aren't|wasn't|weren't|hasn't|haven't|doesn't|don't|didn't|won't|cannot|can't|to|can|could|should|must|will|would|may|might";
+const negated = (words: string) => String.raw`(?<!\b(?:${words})\s+(?:(?:yet|been|be|really|fully|quite|actually|currently|even)\s+){0,2})`;
 /** A value that says the opposite when a column or label is followed by it: "In stock: No", "Imported? 0". */
 const DENIED = String.raw`(?!\W{0,3}(?:no|none|false|n/a|0(?![.,\d]))(?![\w.]))`;
 
 /**
- * What lets an answer mention a wrong item without naming it as part of its answer, in the task's terms: `says` is
- * the statement ("it is in stock"). `states` are explicit statements that the item is not part of the answer
- * ("in stock", "overpaid", "outside the top ten"); `facts` are plain facts that show it (65 available, $0 left), which
+ * What says a wrong item is not part of the answer, in the task's terms: `says` is the statement ("that it is in stock").
+ * `states` are explicit statements of it ("in stock", "overpaid", "outside the top ten"), which excuse a mention
+ * anywhere, even on a row of the answer's own table; `facts` are plain facts that show it (65 available, $0 left), which
  * excuse a mention only outside the part of the answer that gives the answer.
  */
 export type Excuse = { says: string; states: RegExp; facts: RegExp | null };
@@ -270,8 +280,8 @@ const LEFT_OUT = [
 
 /** A string is a statement that counts only when not negated just before it nor denied just after it; a RegExp is taken as written. */
 type Phrase = string | RegExp;
-const union = (phrases: Phrase[]) =>
-  new RegExp(phrases.map((p) => `(?:${typeof p === "string" ? `${NEGATED}(?<![\\w'])(?:${p})(?![\\w'])${DENIED}` : p.source})`).join("|"), "i");
+const union = (phrases: Phrase[], negators = NEGATORS) =>
+  new RegExp(phrases.map((p) => `(?:${typeof p === "string" ? `${negated(negators)}(?<![\\w'])(?:${p})(?![\\w'])${DENIED}` : p.source})`).join("|"), "i");
 
 /**
  * An excuse made of phrases. A string phrase counts only when it is not negated just before it and not denied just
@@ -280,6 +290,21 @@ const union = (phrases: Phrase[]) =>
  */
 export function excuse(says: string, states: Phrase[], facts: Phrase[] = []): Excuse {
   return { says, states: union([...states, ...LEFT_OUT]), facts: facts.length ? union(facts) : null };
+}
+
+/**
+ * One negative check's rule: what counts as presenting a wrong item as part of the answer. `claim` is what such a
+ * mention says of the item ("is not imported yet"); `asserts` the statements that say it, which make a mention outside
+ * the answer count; `unless` what says the item is left out.
+ */
+export type Presenting = { claim: string; asserts: RegExp; unless: Excuse };
+
+/**
+ * A rule made of phrases, read as `excuse` reads them; a string phrase of `asserts` is also undone by "no" or "without"
+ * just before it ("no balance").
+ */
+export function presenting(claim: string, asserts: Phrase[], unless: Excuse): Presenting {
+  return { claim, asserts: union(asserts, `${NEGATORS}|no|without|nor`), unless };
 }
 
 /** A mention of a ref: where it is in the answer and what the text around it says. */
@@ -292,24 +317,56 @@ export function mentionsOf(answer: string, refs: Ref[]): Mention[] {
 }
 
 /**
- * Whether a mention is excused. In a block that names a right item too (`answerBlocks`), that is the table, list or
- * clause that gives the answer, only an explicit statement on the item's own row or item excuses it. Anywhere else
- * a statement or a plain fact does, read with the line introducing its list.
+ * The part of an answer that gives the answer: the blocks (tables, lists, clauses) that give its right items. Taken
+ * largest first, a block belongs to it when it names a right item no block taken before it names; a block that only
+ * names right items already given is a remark about them ("Most urgent: PO-1177 is past due"), not part of the answer.
  */
-export function excused(m: Mention, why: Excuse, answerBlocks: Set<string> = new Set()): boolean {
-  if (answerBlocks.has(m.block)) return why.states.test(m.own);
-  return why.states.test(m.context) || !!why.facts?.test(m.context);
+export function answerPart(answer: string, right: Ref[]): Set<string> {
+  const byBlock = new Map<string, { refs: Set<number>; first: number }>();
+  for (const m of mentionsOf(answer, right)) {
+    const b = byBlock.get(m.block) ?? { refs: new Set<number>(), first: m.start };
+    b.refs.add(m.ref);
+    byBlock.set(m.block, b);
+  }
+  const given = new Set<number>(), part = new Set<string>();
+  for (const [block, b] of [...byBlock].sort(([, x], [, y]) => y.refs.size - x.refs.size || x.first - y.first)) {
+    if ([...b.refs].some((r) => !given.has(r))) part.add(block);
+    for (const r of b.refs) given.add(r);
+  }
+  return part;
 }
 
 /**
- * The negative check: the answer names none of `refs` as part of its answer. A ref counts as named when the answer
- * mentions it at least once without excusing it (see `excused`); `right` are the items the answer should give,
- * which mark the part of the answer that gives it.
+ * Whether a mention presents its item as part of the answer. In the part that gives the answer, it does unless its own
+ * row or item says explicitly that the item is left out. Anywhere else it does only when its context (read with the
+ * line introducing its list) asserts the claim and nothing there says the item is left out. `bare` takes the names of
+ * the items out of a context before the claim is looked for, so that a task named "Call about the late payment" does not
+ * assert "late" by its name.
  */
-export function namesNone(name: string, answer: string, refs: Ref[], unless: Excuse, right: Ref[] = []): Check {
-  const blocks = new Set(mentionsOf(answer, right).map((m) => m.block));
-  const named = [...new Set(mentionsOf(answer, refs).filter((m) => !excused(m, unless, blocks)).map((m) => refs[m.ref]!.label))];
-  return check(name, named.length === 0, `names ${list(named)} without saying ${unless.says}`);
+export function presents(m: Mention, rule: Presenting, part: Set<string>, bare: (text: string) => string = (t) => t): boolean {
+  const { states, facts } = rule.unless;
+  if (part.has(m.block)) return !states.test(m.own);
+  return rule.asserts.test(bare(m.context)) && !states.test(m.context) && !facts?.test(m.context);
+}
+
+/** A context with every mention of `refs` replaced by a placeholder. */
+export const withoutNames = (refs: Ref[]) => (text: string) => refs.reduce((t, r) => t.replace(r.pattern, "…"), text);
+
+/**
+ * The negative check: the answer presents none of `refs` as part of its answer (see `presents`). `right` are the items
+ * the answer should give, which mark the part of the answer that gives it.
+ */
+export function namesNone(name: string, answer: string, refs: Ref[], rule: Presenting, right: Ref[] = []): Check {
+  const part = answerPart(answer, right);
+  const bare = withoutNames([...refs, ...right]);
+  const found = mentionsOf(answer, refs).filter((m) => presents(m, rule, part, bare));
+  const inside = [...new Set(found.filter((m) => part.has(m.block)).map((m) => refs[m.ref]!.label))];
+  const outside = [...new Set(found.filter((m) => !part.has(m.block)).map((m) => refs[m.ref]!.label))].filter((l) => !inside.includes(l));
+  const detail = [
+    ...(inside.length ? [`lists ${list(inside)} with the right items without saying ${rule.unless.says}`] : []),
+    ...(outside.length ? [`says ${list(outside)} ${rule.claim}`] : []),
+  ].join("; ");
+  return check(name, found.length === 0, detail);
 }
 
 // ---------- numbers ----------

@@ -45,6 +45,12 @@ test("resume: other options, the client version, the listings and the starting w
   expect(resumeProblems(fakeMeta(), next, runs)).toEqual(["different n", "a different client", "a different starting world (the suite's seed changed)"]);
 });
 
+test("resume: a benchmark whose clients ran in another timezone, or before the runner set one, is refused", () => {
+  expect(resumeProblems(fakeMeta(), fakeMeta({ timezone: "Europe/Madrid" }), runs)).toEqual(["a different timezone: this label's clients ran in America/Los_Angeles; the suite is now in Europe/Madrid"]);
+  const { timezone: _, machine: __, ...old } = fakeMeta();
+  expect(resumeProblems(old as ReturnType<typeof fakeMeta>, fakeMeta(), runs)).toEqual(["it was started before the runner set the clients' timezone: its clients were told the machine's date (and Codex its timezone), not the company's"]);
+});
+
 test("model: a run that reports another model than the label's cannot join it; an unreported one is not compared", () => {
   const established = reportedModels(runs);
   expect(established).toEqual(["claude-opus-5-5"]);

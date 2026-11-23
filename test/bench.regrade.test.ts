@@ -97,12 +97,37 @@ test("regrade: a run that flips from fail to pass keeps its history; informative
 
 test("regrade: one run, pure; a run that errored passes once its checks do, as on the first grading", () => {
   const r = fakeRun("t", "code", 1, { status: "error", error: "the client exited with 1", checks: [{ name: "a", pass: false }] });
-  const { result, changed } = regrade(r, [{ name: "a", pass: true }], by);
+  const { result, changed } = regrade(r, [{ name: "a", pass: true }], by, { worldChanged: true });
   expect([changed, result.status, result.error]).toEqual([true, "pass", "the client exited with 1"]);
-  const same = regrade(r, [{ name: "a", pass: false, detail: "reworded" }], by);
+  const same = regrade(r, [{ name: "a", pass: false, detail: "reworded" }], by, { worldChanged: true });
   expect([same.changed, same.result.status, same.result.checks[0]!.detail, same.result.history]).toEqual([false, "error", "reworded", undefined]);
   // A required check turned informative changes the verdict; the other way round as well.
-  const relaxed = regrade(r, [{ name: "a", pass: false, required: false }, { name: "b", pass: true }], by);
+  const relaxed = regrade(r, [{ name: "a", pass: false, required: false }, { name: "b", pass: true }], by, { worldChanged: true });
   expect([relaxed.changed, relaxed.result.status]).toEqual([true, "pass"]);
   expect(checkChanges(r.checks, relaxed.result.checks)).toEqual(["now informative: a", "new check: b, passes"]);
+});
+
+test("regrade: a stored failure that asked instead of acting becomes asked, with its question; one that wrote stays failed", () => {
+  const root = mkdtempSync(join(tmpdir(), "bench-regrade-asked-"));
+  try {
+    writeMeta(root, fakeMeta(), BEFORE);
+    const question = "Which note should I add: hi or hello?";
+    const failed = [{ name: "one note added", pass: false }, { name: "answer gives the count", pass: false }];
+    // Wrote nothing and asked.
+    store(root, fakeRun("add-note", "direct", 1, { status: "fail", answer: `I haven't added anything yet. ${question}`, checks: failed }));
+    // Asked, but changed the world first: it acted, and failed.
+    store(root, fakeRun("add-note", "code", 1, { status: "fail", answer: question, checks: failed }), { notes: ["seed", "hey", "ho"] });
+    // Wrote nothing and only offered more.
+    store(root, fakeRun("add-note", "direct+search", 1, { status: "fail", answer: "I could not add it. Want me to try again?", checks: failed }));
+
+    const { changes } = regradeDir(root, [addNote], by);
+    const after = new Map(readRuns(root).map((r) => [r.arm, r]));
+    expect(after.get("direct")).toMatchObject({ status: "asked", question, history: [{ status: "fail", failed: ["one note added", "answer gives the count"] }] });
+    expect(after.get("code")!.status).toBe("fail");
+    expect(after.get("code")!.question).toBeUndefined();
+    expect(after.get("direct+search")!.status).toBe("fail");
+    expect(changes.map((c) => [c.run.arm, c.from, c.run.status])).toEqual([["direct", "fail", "asked"]]);
+    expect(changes[0]!.why).toContain(`asked the user, having changed nothing: "${question}"`);
+    expect(renderReport(fakeMeta(), readRuns(root))).toContain(`- **add-note / direct #1** (regraded; was fail): "${question}"`);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

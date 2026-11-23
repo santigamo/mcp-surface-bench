@@ -1,5 +1,5 @@
 import type { Suite } from "../../src/core/tool.ts";
-import { clock, createWorld } from "./seed.ts";
+import { clock, createWorld, TIMEZONE } from "./seed.ts";
 import { tasks } from "./tasks.ts";
 import { tools as catalog } from "./tools/catalog.ts";
 import { tools as commerce } from "./tools/commerce.ts";
@@ -17,6 +17,7 @@ import type { World } from "./world.ts";
 /** A cannabis distributor and grower in California, with a year of sales, purchasing, inventory and compliance history. */
 export const erp: Suite<World> = {
   name: "erp",
+  timezone: TIMEZONE,
   createWorld,
   clock,
   handlers: [...session, ...catalog, ...inventory, ...costing, ...orders, ...purchasing, ...directory, ...commerce, ...compliance, ...cultivation, ...history],

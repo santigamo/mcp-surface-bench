@@ -19,6 +19,11 @@ export type ClientRun = {
   /** Reasoning effort. Undefined: the client's default, and nothing is passed. */
   effort?: string;
   toolSearch: ToolSearch;
+  /**
+   * The user's timezone, which is the suite's: the client runs with TZ set to it, so the date it tells the model (and,
+   * for Codex, the timezone) are the company's, not the machine's.
+   */
+  timezone: string;
   /** The one MCP server the model may use. */
   server: ServerSpec;
 };
@@ -85,9 +90,10 @@ export const LIMIT_TEXT = /usage limit|rate.?limit|hit your limit|out of extra u
 
 /**
  * The environment a client may see from the runner's: identity, locale, proxies and certificates. Session tokens,
- * other agents' variables and switches such as CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS stay out.
+ * other agents' variables and switches such as CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS stay out, and so does the
+ * runner's TZ: a client's TZ is the run's timezone, which each client sets.
  */
-const PASS = /^(HOME|USER|LOGNAME|SHELL|LANG|LC_[A-Z]+|TERM|TZ|__CF_USER_TEXT_ENCODING|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|SSL_CERT_(FILE|DIR)|NODE_EXTRA_CA_CERTS)$/;
+const PASS = /^(HOME|USER|LOGNAME|SHELL|LANG|LC_[A-Z]+|TERM|__CF_USER_TEXT_ENCODING|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|SSL_CERT_(FILE|DIR)|NODE_EXTRA_CA_CERTS)$/;
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
 
 export function baseEnv(extra: Record<string, string>): Record<string, string> {

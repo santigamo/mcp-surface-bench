@@ -9,7 +9,8 @@ import codex, { effortProblems as codexEffort, toolNames } from "../src/bench/cl
 import { serverSpec } from "../src/bench/server.ts";
 
 const events = (name: string) => readFileSync(join(import.meta.dir, "fixtures", name), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-const run = (toolSearch: ClientRun["toolSearch"], more: Partial<ClientRun> = {}): ClientRun => ({ prompt: "Who am I?", dir: "/r/run", cwd: "/tmp/cwd", toolSearch, server: serverSpec("direct", "2026-11-23", "/r/run"), ...more });
+const TZ = "America/Los_Angeles";
+const run = (toolSearch: ClientRun["toolSearch"], more: Partial<ClientRun> = {}): ClientRun => ({ prompt: "Who am I?", dir: "/r/run", cwd: "/tmp/cwd", toolSearch, timezone: TZ, server: serverSpec("direct", "2026-11-23", TZ, "/r/run"), ...more });
 
 test("clients are found by file name", async () => {
   expect(clientNames()).toEqual(["claude", "codex"]);
@@ -137,4 +138,19 @@ test("codex: tool names from a rendered prompt input, namespaces included", () =
     { type: "message", role: "user", content: [] },
     { type: "additional_tools", tools: [{ type: "namespace", name: "functions", tools: [{ type: "custom", name: "exec" }] }, { type: "namespace", name: "mcp__erp", tools: [{ type: "function", name: "distru_get_me" }] }] },
   ])).toEqual(["functions.exec", "mcp__erp.distru_get_me"]);
+});
+
+test("both clients run in the run's timezone, and so does the server they start; the runner's own TZ stays out", () => {
+  const was = process.env.TZ;
+  process.env.TZ = "Europe/Madrid";
+  try {
+    const c = claude.command(run("off")), x = codex.command(run("off"));
+    expect(c.env.TZ).toBe(TZ);
+    expect(x.env.TZ).toBe(TZ);
+    expect(JSON.parse(c.config.text).mcpServers.erp.env.TZ).toBe(TZ);
+    expect(x.argv).toContain(`mcp_servers.erp.env={BENCH_SURFACE="direct",BENCH_TODAY="2026-11-23",TZ="${TZ}",BENCH_RUN_DIR="/r/run"}`);
+    expect(claude.command(run("off", { timezone: "Asia/Tokyo" })).env.TZ).toBe("Asia/Tokyo");
+  } finally {
+    if (was === undefined) delete process.env.TZ; else process.env.TZ = was;
+  }
 });

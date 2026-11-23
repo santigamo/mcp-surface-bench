@@ -25,9 +25,31 @@ task is graded, what each task tests, and what the world leaves out.
 
 `createWorld(today)` builds the company from the day and a fixed random seed: the same day always gives the same
 world, and every relative fact ("yesterday", "last quarter", "this year") has data on any day. A run happens at
-10:00 company time (`America/Los_Angeles`). On 2026-11-23 the world holds 5 users, 2 licenses (distribution and
+10:00 company time (`America/Los_Angeles`, the suite's `timezone`). On 2026-11-23 the world holds 5 users, 2 licenses (distribution and
 cultivation) with 6 locations, 39 products (1 inactive), 18 customers and 6 vendors with 31 contacts, 104 sales orders with 100 invoices, 28 purchase orders, 4 menus,
 23 Metrc packages, 12 Metrc activities, 3 manifests, 35 plants in 5 groups, 8 harvests and 14 logged actions.
+
+### The user is where the company is
+
+The suite exports its timezone (`erp.timezone`, `America/Los_Angeles`), and the benchmark puts the user there too, so
+that "yesterday" and "today" mean the same day to the agent and to the graders:
+
+- the runner takes `today` as the current date in the suite's timezone, not on the machine running it, and builds the
+  world, runs `preflight` and grades for that day;
+- it starts the agent's client with `TZ` set to the suite's timezone (`ClientRun.timezone`), and the MCP server too
+  (`serverSpec`), so code the model runs on the code surface reads local dates there. Claude Code tells the model
+  "Today's date is …" from its local date, and Codex tells it `<current_date>` and `<timezone>`; both follow `TZ`.
+  The runner's own `TZ` is not passed through;
+- meta.json records the timezone, `today` (the date there) and the machine's own timezone and date, which the runs do
+  not use;
+- a resumed benchmark stops when the date in the suite's timezone is no longer the one it started on, and refuses a
+  label started in another timezone or before the runner set the clients' (`resume.ts`);
+- a regrade uses the `today` the benchmark recorded and the world it saved.
+
+`clock(today)` is 10:00 company time whatever the hour the run really happens, while the agent's client may read the
+real time (Codex's `exec` can call `new Date()`). Nothing a task asks for falls between the real hour and 10:00 by
+more than `preflight` allows (invoices are kept a day away from the 30-day line), but a task whose answer turned on
+the hour of the day would need the runs to happen near 10:00 company time.
 
 Facts a task asks for are placed by hand (the four sold-out products, the failed adjustment, PO-1182, SO-1042's
 price change); the rest is generated around them. Totals a task ranks or compares are planned so that they are
@@ -99,16 +121,16 @@ error("search-users", { limit: 500 });           // must fail; returns "<outcome
   on the data, not just on the shape.
 - `test/erp.grading.test.ts`: the matchers of `grading.ts`.
 - `test/erp.tasks.test.ts`: for each task, a correct answer passes and wrong ones fail on the check they should;
-  for each negative check, a careful answer that mentions a wrong item passes and one that includes it fails;
-  `preflight` on every day of 2026 and 2027.
+  for each negative check, a careful answer that mentions a wrong item passes, and one that puts it in its list or
+  table fails, and so does one that says in a remark or a second list that it belongs to the answer; answers of the
+  pilot runs, verbatim (`test/fixtures/pilot-answers.ts`); `preflight` on every day of 2026 and 2027.
 - `test/erp.flows.test.ts`: for each task, the tool calls a competent agent would make, through the strict runtime,
   ending in the task's own grader; both routes where a task has two (a report, or paging through a search).
 
 ## How tasks are graded
 
-A task's grader returns named checks. A run passes when every required check passes. A check marked
-`required: false` is informative: it is reported, but does not decide the run. It measures a quality the prompt
-did not strictly ask for.
+A task's grader returns named checks. A check marked `required: false` is informative: it is reported, but does not
+decide the run. It measures a quality the prompt did not strictly ask for.
 
 **Read tasks** are graded on the final answer, by deterministic text matching (no model), and on the world, which
 must be exactly as it was. **Write tasks** are graded on the world after the run, compared with the world before:
@@ -116,6 +138,30 @@ what must have changed, and that nothing else did (`unchangedExcept`: the logged
 the answer text is not read.
 
 Every fact a grader expects is computed from the world the run started from, so the graders follow the day.
+
+### Three outcomes
+
+A graded run has one of three outcomes. They are a property of the run's result (`status` in result.json), worked
+out by the runner (`src/bench/grade.ts`, `src/bench/asked.ts`) from the checks, the answer and the world the run left;
+a task's checks know nothing of them.
+
+- **pass**: every required check passes. A run that passes is a pass whatever it asks or offers.
+- **asked**: the agent stopped to ask the user for something it needed, and did nothing. All three hold: the world
+  is exactly as the run found it (as JSON, keys in any order); the task's required checks did not all pass; and the
+  answer puts a question to the user (`questionOf`): a sentence of its prose that ends in a question mark and does not
+  only offer more. An offer is a question that opens, or whose last clause after a colon or comma opens, with "want
+  me to", "would you like me to", "do you want me to", "want the/that/more…", "shall/should/can I also", "anything
+  else", "does that help", "how about", or that ends in "too?" or "as well?". Headings, quotes, table rows, code and
+  link targets are not read. So "Which payment method should I use: ACH, Check or Cash?" and "Should I deactivate it?"
+  ask; "Want me to import these?" and "I can import these if you tell me which product to use" do not. In a headless
+  run nobody answers, so the run ends there: it is neither a pass nor a fail. The report lists each with its question.
+- **fail**: any other graded run, a timeout or a client error included (`fail`, `timeout`, `error`). A client error
+  wins over an ask: a run that ended in an error is not taken to have ended by asking.
+
+A known limit of the rule: a run that fails its checks and also asks a question it did not need ("Five are unpaid:
+… Which vendor should I call first?") counts as asked. The report quotes every question, so such a run can be seen.
+
+A regrade applies the same rule to stored runs, from their answer and the world.json they left.
 
 ### Matching
 
@@ -137,57 +183,80 @@ Every fact a grader expects is computed from the world the run started from, so 
 
 ### Negative checks
 
-A negative check ("names no product of the main menu that is in stock") fails an answer that presents a wrong
-item as part of its answer. It passes an answer that mentions the item while saying it is not part of the answer:
-"The other 14 products are in stock. The lowest are Blue Dream Cartridge 1g with 65 available and Blue Dream 3.5g
-with 70" is a correct answer to "which products are sold out?".
+A negative check ("names no product of the main menu that is in stock") fails an answer that presents a wrong item as
+part of its answer. Each check's rule (`presenting` in `tasks.ts`, applied by `namesNone` and `presents` in
+`grading.ts`) says what that means for its task. Where the mention is decides how it is read.
 
-The rule (`namesNone` in `grading.ts`): a wrong item counts as named when the answer mentions it at least once
-without excusing it. What excuses a mention is the task's statement of why the item is left out (`excuse` in
-`tasks.ts`), in two strengths:
+**In the part of the answer that gives the answer** (`answerPart`): the tables, lists and clauses that give the right
+items. Taken largest first, a block belongs to it when it names a right item no block taken before it names; a block
+that only names right items already given is a remark about them ("Most urgent: PO-1177 is past due"), not part of
+it. There a wrong item counts unless its own row or item says explicitly that it is left out (the rule's
+**statements**: "| Blue Dream 7g | In stock |", "PO-1176 (overpaid)"). A fact is not enough: "Sold out: Gelato 3.5g,
+Blue Dream 7g (65 available)" fails.
 
-- **an explicit statement**: "in stock", "overpaid", "outside the top ten", "not overdue", "under the threshold",
-  "already imported", and on every task "not included", "excluded" and the like;
-- **a plain fact that shows it**: "65 available", "$0 left", "on the Spring Menu", "this morning", another
-  manifest's number, another user's name.
+**Anywhere else** (a remark, a note, another list): a mention counts only when its context **asserts** that the item
+belongs to the answer, in the task's terms below, and nothing there says it is left out (a statement, or a plain fact
+that shows it: "65 available", "on the Spring Menu", "this morning"). A remark can mention a wrong item for any reason
+at all, so outside the answer the rule asks what the remark claims of the item, not whether it gave one of a list of
+reasons. "Gelato 3.5g is sold out. Blue Dream 7g is running low" passes; "Also sold out: Blue Dream 7g" fails. The
+items' own names are taken out of a context before the assertion is looked for (a task called "Call Sunset Dispensary
+about the late payment" does not assert "late").
 
-Where the mention is decides which one is needed. The part of the answer that gives the answer is the table, the
-list, or the clause that also names a right item. A wrong item there is excused only by an explicit statement on
-its own row or item ("| Blue Dream 7g | In stock |"). Anywhere else, in a remark, another list or a separate
-clause, a fact is enough too. So "Sold out: Gelato 3.5g, Blue Dream 7g (65 available)" fails, and "Gelato 3.5g is
-sold out. Blue Dream 7g has 65 available" passes.
+| Check | Presenting a wrong item as part of the answer: a remark asserts that it… | What says it is left out (statements; facts) |
+| --- | --- | --- |
+| `commerce-main-menu-sold-out`: names no product of the main menu that is in stock | is sold out: "sold out", "out of stock", "unavailable", "0 available", "not in stock" | "in stock", "available", "restocked"; a positive quantity available or left |
+| `commerce-main-menu-sold-out`: names no product sold out only on another menu | is sold out, or on the main menu | "another menu", "only on the Spring Menu"; another menu's name |
+| `compliance-unimported-packages`: names no package that is already imported | is not imported: "unimported", "not (yet) imported", "hasn't been imported", "awaiting / ready for / to be imported", "importable", "not in Distru", "missing from inventory" | "imported", "already in Distru" |
+| `compliance-manifest-packages`: names no package of another manifest | is on this manifest: "on this/the manifest", "on 0001234567" | "another / second / outgoing manifest", "not on this manifest"; another manifest's number |
+| `cultivation-plants-in-veg`: names no plant group without plants in veg | has plants in veg: "in veg", "vegetative", "vegging", "in the Veg Room" | "immature", "clones", "flowering", "harvested", "none in veg" |
+| `cultivation-harvest-by-strain`: gives no weight for strains not harvested last month | was harvested last month: "last month", the month's name | "not last month"; "this month", "today", "yesterday", another month's name |
+| `directory-sunset-rep-buyer`: gives neither the rep nor the buyer of Sunset Wellness Collective | is Sunset Dispensary's: "rep", "owner", "buyer", "email", "contact", "Sunset Dispensary" | "Sunset Wellness Collective" |
+| `directory-my-overdue-tasks`: names none of my tasks that are done or not yet due | is overdue: "overdue", "past due", "is/days late", "late by" | "due later today", "due tomorrow", "completed", "done", "not overdue" |
+| `directory-my-overdue-tasks`: names no task of another user | is yours and overdue: as above, or "your task", "yours", "assigned to you" | "someone else's", "a colleague's", "assigned to Daniel"; another user's name |
+| `history-public-api-yesterday`: names no record the public API changed on another day | was changed by the public API yesterday: "API", "API key", "storefront sync", "yesterday", yesterday's date or weekday | "not yesterday", "another day"; another day's date, "today", "this morning", "two days ago" |
+| `history-public-api-yesterday`: names no record only users changed yesterday | was changed by the public API: "API", "API key", "storefront sync", "integration" | "not by the public API", "in the web app", "through MCP", "by hand", "users"; a user's name |
+| `inventory-below-minimum`: names no product at or above its minimum, or without one | is below its minimum: "below / under / short of its minimum (threshold, reorder point)", "short by" | "no minimum", "not below", "above / at its minimum" |
+| `orders-overdue-invoices`: lists no invoice overdue 30 days or less, paid or voided | is more than 30 days overdue: "more than / over 30 days", "30+ days", "45 days overdue" (any number over 30) | "under the threshold", "within 30", "not overdue", "paid", "voided", "canceled" |
+| `orders-top-customers`: names no customer outside the top ten | is in the top ten: "top 10", "in / made the top", "#3", "3rd", "tenth" | "11th", "outside the top", "missed", "before the quarter", "canceled" |
+| `purchasing-unpaid-pos`: lists no purchase order paid in full | is not paid in full: "unpaid", "not (fully) paid", "partially paid", "owes", "outstanding", "balance due / of $…", "overdue" | "paid in full", "overpaid", "settled", "no balance", "nothing owed"; "$0 left", "balance of $0" |
+
+A statement or assertion does not count when it is negated just before it or denied just after it: "not in stock",
+"hasn't been paid in full", "waiting to be imported" and "In stock: No" excuse nothing, and "not sold out", "isn't late
+yet" and "no balance" assert nothing. Every rule also takes "not included", "excluded", "left out" and the like as a
+statement that the item is left out.
 
 What counts as the context of a mention:
 
 - in a table row: the row, each cell read with its column header ("Imported: Yes", "Status: In stock");
-- in a list item: the item's clause, plus the line that introduces the list ("**In stock, but running low**"),
-  except in the answer's own list, where only the item counts;
+- in a list item: the item's clause, plus the line that introduces the list ("**In stock, but running low**",
+  "Also not imported:"; the last row of a table above a list does not introduce it), except in the answer's own list,
+  where only the item counts;
 - in prose: the clause (sentences split at `. ! ?`, clauses at `;`, a dash, or a comma before "but", "while",
   "though" and the like), plus the clauses and sentences after it on the same line that go on about it: those that
   open with a pronoun ("…, but it is only on the Spring Menu") or with "but" and no subject of their own ("…, but
   only on the Spring Menu", "…, but by users").
 
-A statement does not count when it is negated just before it or denied just after it: "not in stock", "hasn't been
-paid in full", "waiting to be imported" and "In stock: No" excuse nothing.
-
-`test/erp.tasks.test.ts` proves the rule on every negative check: an answer worded as a careful assistant would word
-it ("X is due later today, so it is not overdue", "Laurel Canyon Collective came 11th with $27,024", "INV-4488 is 27
-days overdue, under the threshold", "PO-1176 is overpaid, not underpaid", and the run's answer quoted above)
-passes; the same item put in the answer's list or table fails.
+`test/erp.tasks.test.ts` proves the rule on every negative check, in three answers each: one worded as a careful
+assistant would word it, which passes ("X is due later today, so it is not overdue", "Laurel Canyon Collective came
+11th with $27,024", "PO-1176 is overpaid, not underpaid"); the same item put in the answer's list or table, which
+fails; and the item said to belong to the answer in a remark or a second list ("Also not imported: X", "PO-1176 still
+owes $50"), which fails. It also grades the answers of the pilot runs that had been failed for a remark, verbatim.
 
 Known limits, each a consequence of matching text without a model:
 
+- A remark that presents a wrong item as part of the answer in words none of its rule's assertions covers is not
+  recognised, and the answer passes the check ("Don't forget PO-1176" says nothing the rule reads). The rule reads
+  what is claimed of the item; it cannot read what is implied.
 - A statement in the same clause excuses an item even when it is about the others: "Besides Blue Dream 7g, everything
   is in stock" passes, though it says Blue Dream 7g is not in stock. (A heading such as "Sold out (everything else is
   in stock):" does not excuse the items of the answer's own list below it.)
 - An explicit statement in the answer's own list excuses the item even when the list contradicts it: "Not paid in
   full: …, PO-1176 (overpaid)" passes. The answer says the right thing about the item, in the wrong place.
-- A fact stated only in an earlier sentence about a group is not carried over: "The other 14 are in stock. The
-  lowest are X (65) and Y (70)" fails for X and Y, since "(65)" says nothing by itself.
+- A remark that names right items again and a wrong one with them, in a block that gives no right item for the first
+  time, is read as a remark: "Most urgent: PO-1177 and PO-1176" passes unless it says PO-1176 is unpaid.
 - Context is followed only forward and on the same line, and only into a clause that opens with a pronoun or a
   subjectless "but".
-- The vocabulary is English and finite. An excuse worded in a way none of the task's phrases covers is not
-  recognised, and the answer fails the check.
+- The vocabulary is English and finite.
 
 ### Informative checks
 

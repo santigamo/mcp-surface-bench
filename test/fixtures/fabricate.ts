@@ -10,7 +10,7 @@ export const ARMS: Meta["arms"] = [
 export function fakeMeta(o: Partial<Meta> & { arms?: Meta["arms"] } = {}): Meta {
   const arms = o.arms ?? ARMS;
   return {
-    format: 2, label: "fab", startedAt: "2026-11-23T09:00:00.000Z", today: "2026-11-23",
+    format: 2, label: "fab", startedAt: "2026-11-23T09:00:00.000Z", today: "2026-11-23", timezone: "America/Los_Angeles", machine: { timezone: "America/Los_Angeles", date: "2026-11-23" },
     options: { arms: arms.map((a) => a.name), client: "claude", model: null, effort: null, tasks: ["t1", "t2"], n: 2, timeoutSeconds: 600, seed: 5, prompt: null },
     client: { name: "claude", version: "2.1.330 (Claude Code)", setup: [] },
     git: { commit: "abcdef1234567890", dirty: false },

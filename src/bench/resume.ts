@@ -28,6 +28,12 @@ export function resumeProblems(previous: Meta, next: Meta, runs: RunResult[]): s
     problems.push(`a different effort: this label asked for ${modelName(previous.options.effort)}; given ${modelName(next.options.effort)}`);
   }
 
+  if (previous.timezone !== next.timezone) {
+    problems.push(previous.timezone
+      ? `a different timezone: this label's clients ran in ${previous.timezone}; the suite is now in ${next.timezone}`
+      : "it was started before the runner set the clients' timezone: its clients were told the machine's date (and Codex its timezone), not the company's");
+  }
+
   const { arms: _a, model: _m, effort: _e, ...restWas } = previous.options;
   const { arms: _b, model: _n, effort: _f, ...restNow } = next.options;
   const options = (Object.keys(restWas) as (keyof typeof restWas)[]).filter((k) => !same(restWas[k], restNow[k]));

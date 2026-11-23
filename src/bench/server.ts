@@ -11,14 +11,18 @@ const SERVE = resolve(import.meta.dir, "../surfaces/serve.ts");
 
 export type ServerSpec = { name: string; command: string; args: string[]; env: Record<string, string> };
 
-/** `runDir` undefined: the server keeps no trace and no world, which is all a listing needs. */
-export function serverSpec(surface: string, today: string, runDir?: string): ServerSpec {
+/**
+ * `today` is the world's day and `timezone` the suite's: the server runs in it (TZ), like the client, so that code
+ * the model runs on the code surface reads local dates where the company is. `runDir` undefined: the server keeps no
+ * trace and no world, which is all a listing needs.
+ */
+export function serverSpec(surface: string, today: string, timezone: string, runDir?: string): ServerSpec {
   return {
     name: SERVER_NAME,
     // The runner runs under Bun, so this is the absolute path of the same Bun.
     command: process.execPath,
     args: [SERVE],
-    env: { BENCH_SURFACE: surface, BENCH_TODAY: today, ...(runDir ? { BENCH_RUN_DIR: runDir } : {}) },
+    env: { BENCH_SURFACE: surface, BENCH_TODAY: today, TZ: timezone, ...(runDir ? { BENCH_RUN_DIR: runDir } : {}) },
   };
 }
 

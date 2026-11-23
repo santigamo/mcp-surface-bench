@@ -86,5 +86,10 @@ export function parseOptions(argv: string[], known: { surfaces: string[]; client
 const pad = (n: number) => String(n).padStart(2, "0");
 /** Local time, sortable: 2026-11-23-101500. */
 export const stamp = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-/** The machine's local date: YYYY-MM-DD. */
-export const localDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+/**
+ * The machine's own date, YYYY-MM-DD, recorded in meta.json beside the suite's. The runs use the date in the suite's
+ * timezone (`dayIn(suite.timezone, now)`), which is what the client tells the model once its TZ is set to it.
+ */
+export const machineDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+/** The machine's own timezone, as the runtime resolves it. */
+export const machineTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;

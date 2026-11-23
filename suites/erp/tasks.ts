@@ -4,8 +4,8 @@
 import { addDays, dayIn } from "../../src/core/kit.ts";
 import type { Check, Task } from "../../src/core/tool.ts";
 import {
-  amount, attributed, check, diff, excuse, excused, firstMentioned, informative, list, literal, mentions, mentionsAll, mentionsCount, mentionsOf, named, namesNone, numbered,
-  numbers, onDay, percentage, quotes, sentences, tagged, unchanged, unchangedExcept, valuesNear, weekday, weight, type Ref,
+  amount, answerPart, attributed, check, diff, excuse, firstMentioned, informative, list, literal, mentions, mentionsAll, mentionsCount, mentionsOf, named, namesNone, numbered,
+  numbers, onDay, percentage, presenting, presents, quotes, sentences, tagged, unchanged, unchangedExcept, valuesNear, weekday, weight, withoutNames, type Ref,
 } from "./grading.ts";
 import { clock, lastMonth, quarter } from "./seed.ts";
 import {
@@ -63,82 +63,119 @@ const write = (id: string, source: string, prompt: string, grade: (run: { before
   id, source, prompt, kind: "write", grade,
 });
 
-// ---------- what excuses a wrong item ----------
+// ---------- what counts as presenting a wrong item as part of the answer ----------
 //
-// A negative check fails an answer that names a wrong item as part of its answer, and passes one that mentions it to
-// say why it is left out (see `namesNone` in grading.ts). Each excuse below is the task's statement of that: first
-// what counts as saying so explicitly, which works anywhere, even next to the right items; then the plain facts that
-// show it, which work only in a remark apart from them. Every check also takes "not included", "excluded" and the like.
+// A negative check fails an answer that presents a wrong item as part of its answer (see `presents` in grading.ts).
+// Each rule below says, in the task's terms:
+// - what a remark must say of a wrong item to present it as part of the answer (the claim, and the statements that
+//   make it). A mention outside the part of the answer that gives the answer counts only when its context says so;
+// - what says the item is left out: explicit statements, which excuse a mention anywhere, even on a row of the
+//   answer's own table; then plain facts that show it, which excuse it only outside the answer. Every rule also takes
+//   "not included", "excluded" and the like.
 
-const IN_STOCK = excuse("that it is in stock",
+const SOLD_OUT = ["sold out", "out of stock", "(?:none|nothing|zero|0) (?:units? )?(?:left|available|on hand|in stock)", "unavailable", "no (?:stock|inventory|units) (?:left|available|on hand)",
+  /\b(?:not|no longer|isn't|aren't) (?:in stock|available)\b/];
+
+const IN_STOCK = presenting("is sold out", SOLD_OUT, excuse("that it is in stock",
   ["in stock", "(?:is|are|still) available", "not sold out", "(?:has|have|with) (?:some |plenty of )?stock", "restocked", /sold out\W{1,3}(?:no|false)\b/],
-  [String.raw`[1-9][\d,]*(?:\.\d+)?\s*(?:units?\s+)?(?:available|on hand|in stock|left|remaining)`]);
+  [String.raw`[1-9][\d,]*(?:\.\d+)?\s*(?:units?\s+)?(?:available|on hand|in stock|left|remaining)`]));
 
 const ON_ANOTHER_MENU = (w: World, main: Menu | undefined) => {
   const others = w.menus.filter((m) => m !== main).flatMap((m) => [named(m.name).pattern, named(m.externalName).pattern]);
-  return excuse("that it is on another menu",
+  return presenting("is sold out on the main menu", [...SOLD_OUT, "(?:on|in) the main (?:wholesale )?menu"], excuse("that it is on another menu",
     ["(?:another|other|a different|different) menus?", /\b(?:not|isn't|aren't) (?:on|in) the main/, ...others.map((p) => new RegExp(`\\b(?:only|just) (?:on|in) (?:the )?(?:${p.source})`))],
-    others);
+    others));
 };
 
-const ALREADY_IMPORTED = excuse("that it is already imported", ["imported", "already in (?:distru|inventory)", "has a distru package"]);
+const ALREADY_IMPORTED = presenting("is not imported yet",
+  ["unimported", "un-imported", "importable", /\b(?:not|never) (?:yet )?(?:been )?imported\b/, /\b(?:hasn't|haven't|has not|have not|isn't|aren't|wasn't|weren't) (?:yet |ever )?(?:been )?imported\b/,
+    /\b(?:awaiting|pending|needs?|needing|waiting (?:for|to be)|ready (?:for|to be)|left to be|yet to be|still to be|has to be|have to be) import(?:ed|ing)?\b/,
+    /\b(?:not|isn't|aren't) (?:yet )?in (?:distru|(?:the |your )?inventory)\b/, /\bmissing from (?:distru|(?:the |your )?inventory)\b/],
+  excuse("that it is already imported", ["imported", "already in (?:distru|inventory)", "has a distru package"]));
 
-const ON_ANOTHER_MANIFEST = (w: World, asked: string) => excuse("that it is on another manifest",
-  ["(?:another|other|a different|different|second|separate|outgoing) manifests?", /\b(?:not|isn't|aren't) on (?:this|that|the) manifest/],
-  w.metrcManifests.filter((m) => m.manifestNumber !== asked).flatMap((m) => [m.manifestNumber, m.manifestNumber.replace(/^0+/, "")]));
+const ON_ANOTHER_MANIFEST = (w: World, asked: string) => {
+  const number = `0*${asked.replace(/^0+/, "")}`;
+  return presenting(`is on manifest ${asked}`,
+    [String.raw`(?:on|in|of) (?:the |this |that )?(?:incoming )?manifest(?:\s*(?:#|no\.?)?\s*${number})?(?!\s*(?:#|no\.?)?\s*\d)`, String.raw`(?:on|in|of) (?:manifest\s*)?(?:#|no\.?)?\s*${number}`],
+    excuse("that it is on another manifest",
+      ["(?:another|other|a different|different|second|separate|outgoing) manifests?", /\b(?:not|isn't|aren't) on (?:this|that|the) manifest/],
+      w.metrcManifests.filter((m) => m.manifestNumber !== asked).flatMap((m) => [m.manifestNumber, m.manifestNumber.replace(/^0+/, "")])));
+};
 
-const NOT_IN_VEG = excuse("that it has no plants in veg",
-  ["immature", "seedlings?", "clones?", "flowering", "in flower", "harvested", "mothers?", /(?:not|n't|none (?:are|is)|no plants?)\s+(?:yet\s+)?in (?:veg|the vegetative)/]);
+/** The Veg Room is where the trap's immature plants are: a remark that puts a group there, and says no more, presents it as in veg. */
+const NOT_IN_VEG = presenting("has plants in veg", ["in veg(?:etative)?(?: stage| phase)?", "vegetative", "vegging", "in the veg(?:etative)? (?:stage|phase)", "(?:in )?the veg room"], excuse("that it has no plants in veg",
+  ["immature", "seedlings?", "clones?", "flowering", "in flower", "harvested", "mothers?", /(?:not|n't|none (?:are|is)|no plants?)\s+(?:yet\s+)?in (?:veg|the vegetative)/]));
 
 /** The other account's name, as words: not run together inside an email address, which names it too. */
-const OF_ACCOUNT = (name: string) => excuse(`that it is ${name}'s`, [new RegExp(`(?<![\\w@.])${name.split(/\s+/).join("\\s+")}(?![\\w@]|\\.\\w)`)]);
+const OF_ACCOUNT = (asked: string, name: string) => presenting(`is ${asked}'s`, ["(?:sales )?reps?", "account owner", "owner", "buyers?", "e-?mail", "contacts?", asked],
+  excuse(`that it is ${name}'s`, [new RegExp(`(?<![\\w@.])${name.split(/\s+/).join("\\s+")}(?![\\w@]|\\.\\w)`)]));
 
-const NOT_YET_DUE = excuse("that it is done or not yet due",
+const OVERDUE = ["overdue", "past due", "(?:is|are|was|were|running|days?|hours?|weeks?) late", "late by", "missed (?:its|the) due date"];
+
+const NOT_YET_DUE = presenting("is overdue", OVERDUE, excuse("that it is done or not yet due",
   ["due (?:later )?today", "due tomorrow", String.raw`due in \d+ days?`, String.raw`due (?:next|later this|this coming) \w+`, "upcoming", "completed", "done", "finished",
-    /\b(?:not|n't) (?:yet )?(?:over)?due\b/, /\bnot (?:yet )?late\b/]);
+    /\b(?:not|n't) (?:yet )?(?:over)?due\b/, /\bnot (?:yet )?late\b/]));
 
 const SOMEONE_ELSES = (w: World) => {
   const names = w.users.filter((u) => u.id !== w.me).flatMap((u) => [named(fullName(u)).pattern, named(u.firstName).pattern]);
-  return excuse("that it is another user's",
+  return presenting("is yours and overdue", [...OVERDUE, "your tasks?", "yours", "assigned to you", "you own"], excuse("that it is another user's",
     ["someone else(?:'s)?", "(?:a )?(?:colleague|teammate)(?:'s)?", "another (?:user|person|teammate)(?:'s)?", /\bnot (?:yours|assigned to you|mine)\b/,
       ...names.map((p) => new RegExp(`\\b(?:assigned to|owned by|belongs to|for) (?:${p.source})`))],
-    names);
+    names));
 };
 
-const ON_ANOTHER_DAY = (days: string[]) => excuse("that it happened on another day",
-  [/\bnot yesterday\b/, "(?:on )?(?:another|a different) day"],
-  [...days.map((d) => onDay(d, weekday(d)).pattern), "today", "this morning", "day before yesterday", "(?:two|2|three|3) days ago", "earlier (?:this|last) week"]);
+const BY_THE_API = ["(?:public )?api", "api key", "storefront sync", "integration"];
+
+const ON_ANOTHER_DAY = (yesterday: string, days: string[]) => presenting("was changed by the public API yesterday",
+  [...BY_THE_API, "yesterday", onDay(yesterday, weekday(yesterday)).pattern],
+  excuse("that it happened on another day",
+    [/\bnot yesterday\b/, "(?:on )?(?:another|a different) day"],
+    [...days.map((d) => onDay(d, weekday(d)).pattern), "today", "this morning", "day before yesterday", "(?:two|2|three|3) days ago", "earlier (?:this|last) week"]));
 
 const BY_SOMEONE_ELSE = (w: World) => {
   const names = w.users.flatMap((u) => [named(fullName(u)).pattern, named(u.firstName).pattern]);
-  return excuse("that a user changed it, not the public API",
-    [/\bnot (?:by|through|via|from) the (?:public )?API\b/, "(?:by|through|via|in|from) (?:the )?(?:web app|web|app|MCP|Distru)", "manually", "by hand", "(?:a|another) user",
+  return presenting("was changed by the public API", BY_THE_API, excuse("that a user changed it, not the public API",
+    [/\bnot (?:by|through|via|from) the (?:public )?API\b/, "(?:by|through|via|in|from) (?:the )?(?:web app|web|app|MCP|Distru)", "manually", "by hand", "(?:a|another) user", "users",
       ...names.map((p) => new RegExp(`\\b(?:by|from) (?:${p.source})`))],
-    [...names, "web app", "MCP"]);
+    [...names, "web app", "MCP"]));
 };
 
-const AT_OR_ABOVE_MINIMUM = excuse("that it is at or above its minimum, or has none",
-  ["no (?:minimum|min|low-stock alert|alert|threshold|reorder point)(?: set)?", "without (?:a )?(?:minimum|min|threshold|alert)", "has no min",
-    /\b(?:not|isn't|aren't) below\b/, "above (?:its |the )?(?:minimum|min|threshold)", "at (?:its |the )?(?:minimum|min|threshold)"]);
+const AT_OR_ABOVE_MINIMUM = presenting("is below its minimum",
+  ["(?:below|under|beneath|short of) (?:its |the |their )?(?:minimum|min|threshold|reorder point|low-stock (?:alert|level))", "below (?:its |the )?min(?:imum)? stock(?: level)?", "short by"],
+  excuse("that it is at or above its minimum, or has none",
+    ["no (?:minimum|min|low-stock alert|alert|threshold|reorder point)(?: set)?", "without (?:a )?(?:minimum|min|threshold|alert)", "has no min",
+      /\b(?:not|isn't|aren't) below\b/, "above (?:its |the )?(?:minimum|min|threshold)", "at (?:its |the )?(?:minimum|min|threshold)"]));
 
-const NOT_OVERDUE_ENOUGH = excuse("that it is 30 days overdue or less, paid or voided",
-  ["under (?:the )?(?:threshold|cutoff|cut-off|line|limit|30)", "(?:within|less than|fewer than|under|below|short of) (?:the )?(?:30|thirty)", "below the (?:threshold|cutoff|line)",
-    /\bnot (?:yet )?(?:more than|over|past|beyond) (?:30|thirty)\b/, /\b(?:not|n't) (?:yet )?(?:overdue|due)\b/, "(?:is|was|been|fully|now) paid", "paid (?:in full|off)", "voided", "void", "cancell?ed"]);
+const NOT_OVERDUE_ENOUGH = presenting("is more than 30 days overdue",
+  ["(?:more than|over|beyond|past|at least) (?:30|thirty) days", String.raw`30\+ days`,
+    String.raw`(?:3[1-9]|[4-9]\d|[1-9]\d{2,}) days (?:overdue|past due|late|past (?:its |the )?due date)`, String.raw`(?:overdue|late) (?:by )?(?:3[1-9]|[4-9]\d|[1-9]\d{2,}) days`],
+  excuse("that it is 30 days overdue or less, paid or voided",
+    ["under (?:the )?(?:threshold|cutoff|cut-off|line|limit|30)", "(?:within|less than|fewer than|under|below|short of) (?:the )?(?:30|thirty)", "below the (?:threshold|cutoff|line)",
+      /\bnot (?:yet )?(?:more than|over|past|beyond) (?:30|thirty)\b/, /\b(?:not|n't) (?:yet )?(?:overdue|due)\b/, "(?:is|was|been|fully|now) paid", "paid (?:in full|off)", "voided", "void", "cancell?ed"]));
 
-const OUTSIDE_TOP_TEN = excuse("that it is outside the top ten",
-  [String.raw`(?:1[1-9]|[2-9]\d)(?:st|nd|rd|th)`, "eleventh|twelfth|thirteenth", String.raw`(?:#|no\.?\s*|number |rank(?:ed)? |place[d]? )1[1-9]`,
-    "outside (?:of )?the top", "(?:just )?missed", "below the top", "out of the top", /\b(?:not|didn't|doesn't|don't) (?:in|make|crack|reach|part of) the top/,
-    "cancell?ed", "(?:before|prior to|outside) the quarter", "(?:previous|prior|earlier) quarter"]);
+const OUTSIDE_TOP_TEN = presenting("is in the top ten",
+  ["top (?:10|ten)", "(?:in|made|makes|make|among) the top", String.raw`(?:#|no\.?\s*|number |rank(?:ed)? )(?:[1-9]|10)(?![\d.,])`, String.raw`(?:1st|2nd|3rd|[4-9]th|10th)`, "tenth"],
+  excuse("that it is outside the top ten",
+    [String.raw`(?:1[1-9]|[2-9]\d)(?:st|nd|rd|th)`, "eleventh|twelfth|thirteenth", String.raw`(?:#|no\.?\s*|number |rank(?:ed)? |place[d]? )1[1-9]`,
+      "outside (?:of )?the top", "(?:just )?missed", "below the top", "out of the top", /\b(?:not|didn't|doesn't|don't) (?:in|make|crack|reach|part of) the top/,
+      "cancell?ed", "(?:before|prior to|outside) the quarter", "(?:previous|prior|earlier) quarter"]));
 
-const PAID_IN_FULL = excuse("that it is paid in full",
-  ["paid in full", "fully paid", "over-?paid", "paid off", "settled", "nothing (?:left|owed|outstanding|due|remaining)", /\bnot underpaid\b/],
-  [String.raw`\$0(?:\.00)?\s*(?:left|remaining|outstanding|owed|due|balance)`, String.raw`balance of \$?0(?:\.00)?(?![\d.,])`]);
+const PAID_IN_FULL = presenting("is not paid in full",
+  ["unpaid", "underpaid", "owe[sd]?", "owing", "outstanding", "(?:open|remaining|unpaid|outstanding) balance", "balance (?:due|owed|left|remaining|outstanding)", String.raw`balance of \$?[1-9]`,
+    "still due", "amount due", "left to pay", "overdue", "past due", "(?:partially|partly) paid", "part-paid",
+    /\b(?:not|never) (?:yet )?(?:been )?(?:fully |entirely )?paid\b/, /\b(?:hasn't|haven't|has not|have not|wasn't|isn't|aren't) (?:yet )?(?:been )?(?:fully |entirely )?paid\b/],
+  excuse("that it is paid in full",
+    ["paid in full", "fully paid", "over-?paid", "paid off", "settled", "nothing (?:left|owed|outstanding|due|remaining)", "no balance", /\bnot underpaid\b/],
+    [String.raw`\$0(?:\.00)?\s*(?:left|remaining|outstanding|owed|due|balance)`, String.raw`balance of \$?0(?:\.00)?(?![\d.,])`]));
 
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-const OUTSIDE_LAST_MONTH = (month: { start: string; end: string }) => excuse("that it was harvested in another month",
-  [/\bnot (?:in )?last month\b/, /\boutside (?:of )?last month\b/],
-  ["this month", "today", "yesterday", "so far", "since then", "the month before", "two months ago", ...MONTH_NAMES.filter((_, i) => i + 1 !== +month.start.slice(5, 7)).map((m) => `(?:in |on )${m}`)]);
+const OUTSIDE_LAST_MONTH = (month: { start: string; end: string }) => {
+  const name = MONTH_NAMES[+month.start.slice(5, 7) - 1]!;
+  return presenting("was harvested last month", ["last month", name, name.slice(0, 3)], excuse("that it was harvested in another month",
+    [/\bnot (?:in )?last month\b/, /\boutside (?:of )?last month\b/],
+    ["this month", "today", "yesterday", "so far", "since then", "the month before", "two months ago", ...MONTH_NAMES.filter((m) => m !== name).map((m) => `(?:in |on )${m}`)]));
+};
 
 /** A sentence that mentions the price only to say it is not what someone changed. */
 const NOT_THE_PRICE = /\b(?:not|n't|other than|except|besides|apart from|rather than) (?:change )?(?:the |its )?pric/i;
@@ -457,18 +494,20 @@ export const tasks: Task<World>[] = [
     const { strains, harvested, elsewhere, month } = harvestsByStrain(w);
     const refs = strains.map((s) => named(s));
     const found = mentionsOf(answer, refs);
-    const other = OUTSIDE_LAST_MONTH(month);
-    const answerBlocks = new Set(found.filter((m) => harvested.some((h) => h.strain === refs[m.ref]!.label)).map((m) => m.block));
-    // A strain harvested only in other months may be named, and its weight given, when the context says so.
+    const rule = OUTSIDE_LAST_MONTH(month);
+    const part = answerPart(answer, harvested.map((h) => named(h.strain)));
+    const bare = withoutNames(refs);
+    // A weight for a strain harvested only in other months counts when the strain is presented as last month's: in the
+    // part of the answer that gives last month's weights, or in a remark that says it was last month.
     const weighed = elsewhere.filter((r) => {
       const weights = [...r.outside, sum(r.outside)];
-      return found.some((m, i) => refs[m.ref]!.label === r.strain && !excused(m, other, answerBlocks)
+      return found.some((m, i) => refs[m.ref]!.label === r.strain && presents(m, rule, part, bare)
         && numbers(answer.slice(m.end, found[i + 1]?.start ?? answer.length).split("\n")[0]! + " " + m.context).some((n) => weights.some((g) => weight(g, WEIGHT_SHARE)(n))));
     });
     return [
       valuesNear("gives each strain's wet weight harvested last month", answer,
         harvested.map((r) => ({ ref: named(r.strain), accepts: weight(r.grams, WEIGHT_SHARE), shows: `${r.grams} g` })), refs),
-      check("gives no weight for strains not harvested last month", weighed.length === 0, `gives a weight for ${list(weighed.map((r) => r.strain))} without saying ${other.says}`),
+      check("gives no weight for strains not harvested last month", weighed.length === 0, `gives a weight for ${list(weighed.map((r) => r.strain))} as last month's, without saying ${rule.unless.says}`),
     ];
   }),
 
@@ -478,7 +517,7 @@ export const tasks: Task<World>[] = [
     return [
       check("gives the sales rep of Sunset Dispensary", mentions(answer, named(asked.rep!)), `missing ${asked.rep}`),
       check("gives the email of its buyer", mentions(answer, literal(asked.buyer!)), `missing ${asked.buyer}`),
-      namesNone("gives neither the rep nor the buyer of Sunset Wellness Collective", answer, [named(other.rep!), literal(other.buyer!)], OF_ACCOUNT(other.company!.name),
+      namesNone("gives neither the rep nor the buyer of Sunset Wellness Collective", answer, [named(other.rep!), literal(other.buyer!)], OF_ACCOUNT(asked.company!.name, other.company!.name),
         [named(asked.rep!), literal(asked.buyer!)]),
     ];
   }),
@@ -526,7 +565,7 @@ export const tasks: Task<World>[] = [
     const { yesterday, otherDays, days, byUsers } = apiChanges(w);
     return [
       mentionsAll("names every record the public API changed yesterday", answer, yesterday.map(recordRef)),
-      namesNone("names no record the public API changed on another day", answer, otherDays.map(recordRef), ON_ANOTHER_DAY(days), yesterday.map(recordRef)),
+      namesNone("names no record the public API changed on another day", answer, otherDays.map(recordRef), ON_ANOTHER_DAY(addDays(w.today, -1), days), yesterday.map(recordRef)),
       namesNone("names no record only users changed yesterday", answer, byUsers.map(recordRef), BY_SOMEONE_ELSE(w), yesterday.map(recordRef)),
     ];
   }),

@@ -4,7 +4,8 @@ import { SERVER_NAME } from "./server.ts";
 import { count, figure, mean, median, oneDecimal, seconds, share, tokens, usd } from "./stats.ts";
 import type { Listing, Meta, RegradePass, RunResult } from "./types.ts";
 
-const GRADED = new Set(["pass", "fail", "timeout", "error"]);
+/** A graded run passed, asked (it failed its checks having changed nothing, to put a question to the user), or failed. */
+const GRADED = new Set(["pass", "asked", "fail", "timeout", "error"]);
 const FAILED = new Set(["fail", "timeout", "error"]);
 
 /** One per arm, in the order the command line gave them; an arm found only in the runs comes after. */
@@ -17,11 +18,15 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 const mine = (t: string) => t.startsWith(`mcp__${SERVER_NAME}`);
 /** The client's own tool for finding deferred tools. */
 const SEARCH_TOOLS = new Set(["ToolSearch"]);
-const passes = (runs: RunResult[]) => {
+type Outcomes = { passed: number; asked: number; failed: number; graded: number };
+const outcomes = (runs: RunResult[]): Outcomes => {
   const graded = runs.filter((r) => GRADED.has(r.status));
-  return { passed: graded.filter((r) => r.status === "pass").length, graded: graded.length };
+  const n = (pick: (r: RunResult) => boolean) => graded.filter(pick).length;
+  return { passed: n((r) => r.status === "pass"), asked: n((r) => r.status === "asked"), failed: n((r) => FAILED.has(r.status)), graded: graded.length };
 };
-const ratio = ({ passed, graded }: { passed: number; graded: number }) => (graded ? `${passed}/${graded}` : "–");
+const ratio = (n: number, { graded }: Outcomes) => (graded ? `${n}/${graded}` : "–");
+/** A task and arm's cell: passed of graded, and how many asked when any did. */
+const cellOf = (o: Outcomes) => (o.graded ? `${o.passed}/${o.graded}${o.asked ? ` (${o.asked} asked)` : ""}` : "–");
 
 export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePass[] = []): string {
   const columns = columnsOf(meta, runs);
@@ -29,7 +34,7 @@ export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePas
 
   out.push(`# ${meta.label}`, "");
   out.push(
-    `${plural(runs.length, "finished run")} on ${meta.today}: ${meta.options.n} rep(s) of each task on each arm, the arms in a random order in each (task, rep) block, seed ${meta.options.seed}. ` +
+    `${plural(runs.length, "finished run")} on ${meta.today} ${whereLine(meta)}: ${meta.options.n} rep(s) of each task on each arm, the arms in a random order in each (task, rep) block, seed ${meta.options.seed}. ` +
       `Commit ${meta.git.commit.slice(0, 10)}${meta.git.dirty ? " (uncommitted changes)" : ""}. Catalog: ${meta.catalog.tools} tools from ${meta.catalog.source}.`,
     "",
     ...modelLines(meta, runs).map((l) => `- ${l}`),
@@ -49,15 +54,18 @@ export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePas
 
   out.push("## Summary", "");
   out.push(table(
-    ["Arm", "Runs", "Passed", "Server calls, median", "Server calls, mean", "Model tool calls, median", "Context processed, median", "Output tokens, median", "Wall time, median", "Cost, median", "Tool listing"],
+    ["Arm", "Runs", "Passed", "Asked", "Failed", "Server calls, median", "Server calls, mean", "Model tool calls, median", "Context processed, median", "Output tokens, median", "Wall time, median", "Cost, median", "Tool listing"],
     columns.map((c) => {
       const used = c.runs.filter((r) => r.usage);
       const listing = listingOf(meta, c);
       const costs = c.runs.flatMap((r) => (r.costUsd === undefined ? [] : [r.costUsd]));
+      const o = outcomes(c.runs);
       return [
         c.arm,
         String(c.runs.length),
-        ratio(passes(c.runs)),
+        ratio(o.passed, o),
+        ratio(o.asked, o),
+        ratio(o.failed, o),
         figure(c.runs.map((r) => r.trace.calls), median, count),
         figure(c.runs.map((r) => r.trace.calls), mean, oneDecimal),
         figure(c.runs.map((r) => r.modelToolCalls), median, count),
@@ -70,6 +78,8 @@ export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePas
     }),
   ));
   out.push(
+    "",
+    "Each graded run has one of three outcomes. **Passed**: its required checks passed. **Asked**: it failed them having left the world unchanged, and its answer puts a question to the user (a choice, or something it needed); in a headless run nobody answers, so the run ended there. An answer that only offers more (\"Want me to…?\") does not count as asking, and a run that passed is a pass whatever it asks. **Failed**: any other graded run (a failed check, a timeout or a client error). The runs that asked are listed with their question below, apart from the failed ones.",
     "",
     "Server calls are the calls the mock answered, from its trace: on `code` each `api.*` call inside an execute counts. Model tool calls are the calls the model itself made, the client's tool searches included. " +
       "Context processed is input + cache read + cache creation + output tokens, summed over the run's requests; its parts are in their own section below. The listing size is approximate; the model sees the tools as the client wraps them.",
@@ -144,8 +154,9 @@ export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePas
 
   const tasks = [...new Set(runs.filter((r) => GRADED.has(r.status)).map((r) => r.task))].sort();
   if (tasks.length) {
-    out.push("## Passes by task", "");
-    out.push(table(["Task", ...columns.map((c) => c.arm)], tasks.map((t) => [t, ...columns.map((c) => ratio(passes(c.runs.filter((r) => r.task === t))))])));
+    out.push("## Outcomes by task", "");
+    out.push("Runs passed of the runs graded, and how many asked when any did; the rest failed.", "");
+    out.push(table(["Task", ...columns.map((c) => c.arm)], tasks.map((t) => [t, ...columns.map((c) => cellOf(outcomes(c.runs.filter((r) => r.task === t))))])));
     out.push("");
   }
 
@@ -157,20 +168,41 @@ export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePas
       "",
     );
     out.push(table(["Arm A", "Arm B", "Tasks both finished", "Won by A", "Won by B", "Tied"], pairs(columns).map(([a, b]) => {
-      const won = { a: [] as string[], b: [] as string[] };
-      let both = 0, tied = 0;
-      for (const t of tasks) {
-        const pa = passes(a.runs.filter((r) => r.task === t)), pb = passes(b.runs.filter((r) => r.task === t));
+      // Each task as the table names it: with the arms that asked on it, when any did.
+      type Named = { task: string; asking: string[] };
+      const won = { a: [] as Named[], b: [] as Named[] }, tied: Named[] = [];
+      let both = 0;
+      for (const task of tasks) {
+        const pa = outcomes(a.runs.filter((r) => r.task === task)), pb = outcomes(b.runs.filter((r) => r.task === task));
         if (!pa.graded || !pb.graded) continue;
         both++;
         const d = pa.passed / pa.graded - pb.passed / pb.graded;
-        if (d > 0) won.a.push(t); else if (d < 0) won.b.push(t); else tied++;
+        const named = { task, asking: [...(pa.asked ? [a.arm] : []), ...(pb.asked ? [b.arm] : [])] };
+        if (d > 0) won.a.push(named); else if (d < 0) won.b.push(named); else tied.push(named);
       }
-      const wins = (ts: string[]) => (ts.length ? `${ts.length} (${ts.join(", ")})` : "0");
-      return [a.arm, b.arm, String(both), wins(won.a), wins(won.b), String(tied)];
+      const name = (n: Named) => (n.asking.length ? `${n.task} (${n.asking.map((arm) => `${arm} asked`).join(", ")})` : n.task);
+      const wins = (ns: Named[]) => (ns.length ? `${ns.length} (${ns.map(name).join(", ")})` : "0");
+      const askedTies = tied.filter((n) => n.asking.length);
+      return [a.arm, b.arm, String(both), wins(won.a), wins(won.b), askedTies.length ? `${tied.length} (${askedTies.map(name).join(", ")})` : String(tied.length)];
     })));
-    out.push("");
+    out.push(
+      "",
+      "A run that asked counts here as not passed, like a failed one: a task that one arm passed and the other asked on is won by the arm that passed, " +
+        "and a task neither passed is tied whether its runs asked or failed. Every task where an arm asked is marked with it, among the wins and among the ties, so a win over an ask can be told from a win over a failure.",
+      "",
+    );
   }
+
+  const asked = runs.filter((r) => r.status === "asked").sort((a, b) => runName(a).localeCompare(runName(b)));
+  out.push("## Runs that asked", "");
+  if (!asked.length) out.push("None.");
+  else out.push("Each stopped to put a question to the user, having changed nothing; the question is quoted from its answer.", "");
+  for (const r of asked) {
+    const was = r.history?.at(-1)?.status;
+    out.push(`- **${runName(r)}**${was && was !== r.status ? ` (regraded; was ${was})` : ""}: "${r.question ?? "?"}"`);
+    out.push(`  - checks it did not pass: ${r.checks.filter((c) => isRequired(c) && !c.pass).map((c) => c.name).join("; ")}`);
+  }
+  out.push("");
 
   const failed = runs.filter((r) => FAILED.has(r.status)).sort((a, b) => runName(a).localeCompare(runName(b)));
   out.push("## Failed runs", "");
@@ -209,6 +241,13 @@ export function renderReport(meta: Meta, runs: RunResult[], regrades: RegradePas
   return out.join("\n");
 }
 
+/** Where the date of the runs is, in words. */
+export function whereLine(meta: Meta): string {
+  if (!meta.timezone) return "(the machine's date: these runs were started before the runner set the clients' timezone, so the clients were told the machine's date, and Codex its timezone, rather than the company's)";
+  const machine = meta.machine && (meta.machine.timezone !== meta.timezone || meta.machine.date !== meta.today) ? `; the machine was in ${meta.machine.timezone}, on ${meta.machine.date}` : "";
+  return `in ${meta.timezone}, where the clients ran${machine}`;
+}
+
 /** The line printed when a run finishes. */
 export function runLine(i: number, of: number, r: RunResult): string {
   const parts = [
@@ -220,7 +259,7 @@ export function runLine(i: number, of: number, r: RunResult): string {
     r.usage ? `context ${tokens(r.usage.contextProcessed)}, output ${tokens(r.usage.output)}` : "no usage",
     ...(r.costUsd !== undefined ? [usd(r.costUsd)] : []),
     ...(r.error ? [`error: ${r.error.slice(0, 120)}`] : []),
-    `answer: ${JSON.stringify(r.answer.slice(0, 80))}`,
+    r.question ? `asked: ${JSON.stringify(r.question.slice(0, 120))}` : `answer: ${JSON.stringify(r.answer.slice(0, 80))}`,
   ];
   return parts.join(" · ");
 }

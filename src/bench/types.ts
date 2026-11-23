@@ -15,10 +15,12 @@ export type Arm = { name: string; surface: string; toolSearch: ToolSearch };
 export const FORMAT = 2;
 
 /**
- * `ungraded` is an ad-hoc `--prompt` run that finished. `limit` never reaches `runs.jsonl`: the run is left
- * unfinished so a resumed benchmark tries it again.
+ * A graded run passed (its required checks pass), asked (it failed them having changed nothing, and its answer puts a
+ * question to the user: see src/bench/asked.ts), or failed (`fail`, `timeout`, `error`). `ungraded` is an ad-hoc
+ * `--prompt` run that finished. `limit` never reaches `runs.jsonl`: the run is left unfinished so a resumed benchmark
+ * tries it again.
  */
-export type Status = "pass" | "fail" | "timeout" | "error" | "limit" | "ungraded";
+export type Status = "pass" | "asked" | "fail" | "timeout" | "error" | "limit" | "ungraded";
 
 /** Tokens as the client reports them. `contextProcessed` is the sum of the four. */
 export type Usage = { input: number; cacheRead: number; cacheCreation: number; output: number; contextProcessed: number };
@@ -76,6 +78,8 @@ export type RunResult = RunKey & {
   effort: string | null;
   effortSource: EffortSource;
   status: Status;
+  /** The question the run put to the user, when its status is `asked`. */
+  question?: string;
   /** Every check, informative ones (`required: false`) included. */
   checks: Check[];
   graded: Grading;
@@ -109,8 +113,16 @@ export type Meta = {
   format: typeof FORMAT;
   label: string;
   startedAt: string;
-  /** The machine's local date when the benchmark started: the date the client tells the model, and the world's day. */
+  /**
+   * The date in the suite's timezone when the benchmark started: the world's day, and the date the client tells the
+   * model, since the client runs with TZ set to that timezone. Every run, and every regrade, uses this one.
+   * (In a benchmark started before `timezone` was recorded, it is the machine's local date.)
+   */
   today: string;
+  /** The suite's timezone, in which the clients ran. Absent in benchmarks started before the runner set the clients' TZ. */
+  timezone?: string;
+  /** The machine's own timezone and date when the benchmark started, for the record: the runs did not use them. */
+  machine?: { timezone: string; date: string };
   options: {
     /** Arm names, in the order the command line gave them: the order of every table. */
     arms: string[];

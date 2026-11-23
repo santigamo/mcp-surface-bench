@@ -3,7 +3,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Task } from "../core/tool.ts";
-import { checkChanges, regrade, runChecks, worldAfter } from "./grade.ts";
+import { checkChanges, regrade, runChecks, worldAfter, worldChanged } from "./grade.ts";
 import { appendRegrade, readRuns, readWorldBefore, rewriteRuns, runDir } from "./storage.ts";
 import { readTrace, summarizeTrace } from "./trace.ts";
 import type { Grading, RegradePass, RunResult, Status } from "./types.ts";
@@ -30,14 +30,23 @@ export function regradeDir<W>(root: string, tasks: readonly Task<W>[], by: Gradi
     const dir = runDir(root, r);
     // Each run gets its own copy, as each run had its own server: a grader cannot leak into the next run's world.
     const start = structuredClone(before);
-    const checks = runChecks(task, { answer: r.answer, before: start, after: worldAfter(structuredClone(before), join(dir, "world.json")) });
+    const after = worldAfter(structuredClone(before), join(dir, "world.json"));
+    const changedWorld = worldChanged(before, after); // before grading: a grader must not decide it
+    const checks = runChecks(task, { answer: r.answer, before: start, after });
     const trace = existsSync(join(dir, "trace.jsonl")) ? summarizeTrace(readTrace(join(dir, "trace.jsonl"))) : undefined;
-    const { result, changed } = regrade(r, checks, by, trace);
-    if (changed) changes.push({ run: result, from: r.status, why: checkChanges(r.checks, checks) });
+    const { result, changed } = regrade(r, checks, by, { worldChanged: changedWorld, ...(trace ? { trace } : {}) });
+    if (changed) changes.push({ run: result, from: r.status, why: [...checkChanges(r.checks, checks), ...askChanges(r, result)] });
     return result;
   });
   rewriteRuns(root, results);
   const pass: RegradePass = { ...by, runs: results.filter((r) => r.status !== "ungraded").length, changed: changes.map((c) => ({ task: c.run.task, arm: c.run.arm, rep: c.run.rep, from: c.from, to: c.run.status })) };
   appendRegrade(root, pass);
   return { pass, changes, skipped };
+}
+
+/** Why a run's outcome changed to or from asked, when its checks alone do not say. */
+function askChanges(was: RunResult, now: RunResult): string[] {
+  if (now.status === "asked" && was.status !== "asked") return [`asked the user, having changed nothing: "${now.question}"`];
+  if (was.status === "asked" && now.status !== "asked") return ["no longer counted as asked"];
+  return [];
 }

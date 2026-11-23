@@ -4,6 +4,8 @@ import { addDays, dayIn } from "../src/core/kit.ts";
 import { clock, createWorld, lastMonth, quarter } from "../suites/erp/seed.ts";
 import { preflight, tasks } from "../suites/erp/tasks.ts";
 import { activeQuantity, availableQuantity, belowMinimum, fullName, invoiceMoney, newId, orderTotal, purchaseMoney, purchaseTotal, type Product, type World } from "../suites/erp/world.ts";
+import { worldHash } from "../src/bench/suite.ts";
+import { API_YESTERDAY_MADRID, PILOT_WORLD_SHA256, UNIMPORTED_DIRECT, UNIMPORTED_DIRECT_SEARCH, UNPAID_DIRECT_SEARCH } from "./fixtures/pilot-answers.ts";
 import { TODAY } from "./helpers.ts";
 
 // ---------- the world of TODAY, and facts about it computed here rather than taken from the graders ----------
@@ -660,10 +662,40 @@ describe("negative checks", () => {
       `${harvestTable}\n| ${thisMonth.strainName} | ${thisMonth.wetWeight.toLocaleString("en-US")} g |`],
   ];
 
-  test("cover every negative check of every task", () => {
-    const negative = tasks.flatMap((t) => t.grade({ answer: "", before: W, after: W }).filter((c) => / no |neither|none of/.test(c.name) && t.kind === "read").map((c) => `${t.id}: ${c.name}`));
-    const covered = new Set(cases.map(([id, check]) => `${id}: ${check}`));
-    expect(negative.filter((n) => !covered.has(n) && !n.includes("does not credit"))).toEqual([]);
+  // Each case: the task, the negative check, and an answer that gives the right items and then, in a remark or a second
+  // list, says a wrong item belongs to the answer too. It must fail that check: outside the part that gives the answer a
+  // mention counts when it asserts the item's membership.
+  const asserted: [string, string, string][] = [
+    ["commerce-main-menu-sold-out", "names no product of the main menu that is in stock", `${soldOutTable}\n\nBlue Dream Cartridge 1g is sold out too.`],
+    ["commerce-main-menu-sold-out", "names no product sold out only on another menu", `${soldOutTable}\n\nAlso sold out: Jack Herer 14g.`],
+    ["compliance-unimported-packages", "names no package that is already imported",
+      `${table(["Tag", "Item"], unimported.map((m) => [m.label, m.itemName]))}\n\nAlso not imported: ${metrcLabel("Gelato Bulk Flower", true)}.`],
+    ["compliance-manifest-packages", "names no package of another manifest",
+      `${table(["Package", "Item"], asked.packages.map((p) => [p.label, p.itemName]))}\n\nAlso on this manifest: ${other.packages[0]!.label}.`],
+    ["cultivation-plants-in-veg", "names no plant group without plants in veg", `${veg.length} plants are in veg: ${vegGroups.map((g) => g.name).join(" and ")}.\n\nOG Kush Run 3 is in veg as well.`],
+    ["cultivation-harvest-by-strain", "gives no weight for strains not harvested last month",
+      `${harvestTable}\n\nAlso harvested last month: ${thisMonth.strainName}, ${thisMonth.wetWeight.toLocaleString("en-US")} g.`],
+    ["directory-sunset-rep-buyer", "gives neither the rep nor the buyer of Sunset Wellness Collective",
+      `${userName(sunset.ownerId)} is the sales rep on Sunset Dispensary, and the buyer is ${buyerOf(sunset.id).email}.\n\nTheir other buyer's email is ${buyerOf(wellness.id).email}.`],
+    ["directory-my-overdue-tasks", "names none of my tasks that are done or not yet due", `${taskList}\n\nAlso overdue: ${dueToday.name}.`],
+    ["directory-my-overdue-tasks", "names no task of another user", `${taskList}\n\n${colleagues.name} is overdue too.`],
+    ["history-public-api-yesterday", "names no record the public API changed on another day",
+      `Yesterday the public API changed:\n${bullets(apiOn(addDays(TODAY, -1)))}\n\nThe API also changed ${apiOn(TODAY)[0]}.`],
+    ["history-public-api-yesterday", "names no record only users changed yesterday",
+      `Yesterday the public API changed:\n${bullets(apiOn(addDays(TODAY, -1)))}\n\nThe public API also changed Wedding Cake 7g.`],
+    ["inventory-below-minimum", "names no product at or above its minimum, or without one",
+      `${table(["Product", "Available", "Minimum"], below.map((p) => [p.name, availableQuantity(W, p), p.thresholdMin!]))}\n\nMilk Chocolate Bar 100mg is below its minimum too.`],
+    ["orders-overdue-invoices", "lists no invoice overdue 30 days or less, paid or voided", `${invoiceTable(overdueInvoices)}\n\n${recent.invoiceNumber} is also more than 30 days overdue.`],
+    ["orders-top-customers", "names no customer outside the top ten", `${topTen}\n\n${ranked[10]!.name} is in the top ten as well.`],
+    ["purchasing-unpaid-pos", "lists no purchase order paid in full", `${poList}\n\n${overpaid.purchaseNumber} still owes $50.`],
+  ];
+
+  test("cover every negative check of every task, in the answer and in a remark that asserts membership", () => {
+    const negative = tasks.flatMap((t) => t.grade({ answer: "", before: W, after: W }).filter((c) => / no |neither|none of/.test(c.name) && t.kind === "read").map((c) => `${t.id}: ${c.name}`))
+      .filter((n) => !n.includes("does not credit"));
+    const covered = (list: [string, string, ...string[]][]) => new Set(list.map(([id, check]) => `${id}: ${check}`));
+    expect(negative.filter((n) => !covered(cases).has(n))).toEqual([]);
+    expect(negative.filter((n) => !covered(asserted).has(n))).toEqual([]);
   });
 
   test.each(cases)("%s, %s: the remark passes", (id, check, ok) => {
@@ -675,6 +707,12 @@ describe("negative checks", () => {
     expect(failures(id, wrong)).toContain(check);
   });
 
+  test.each(asserted)("%s, %s: a remark that says the item belongs to the answer fails", (id, check, wrong) => {
+    expect(failures(id, wrong)).toEqual([check]);
+    // On what the remark says, not because the remark was taken for part of the answer.
+    expect(task(id).grade({ answer: wrong, before: W, after: W }).find((c) => c.name === check)!.detail).toMatch(/^(says|gives a weight for) /);
+  });
+
   test("crediting someone with a change they did not make to the price", () => {
     const id = "history-price-change-so-1042";
     const order = W.salesOrders.find((o) => o.orderNumber === "SO-1042")!;
@@ -684,6 +722,32 @@ describe("negative checks", () => {
     const when = longDate(day(change.changedAt));
     expect(failures(id, `${change.actorName} changed the price on ${when}. ${quantity.actorName} changed the quantity, not the price.`)).toEqual([]);
     expect(failures(id, `${quantity.actorName} changed the price on ${when}, after ${change.actorName} had set it up.`)).toContain("does not credit anyone else with the price change");
+  });
+});
+
+// ---------- answers of the pilot runs, verbatim ----------
+
+describe("answers of the pilot runs", () => {
+  test("the pilots were graded against this world", () => {
+    expect(worldHash(W)).toBe(PILOT_WORLD_SHA256);
+  });
+
+  // Each gives the right items in its tables, then mentions a wrong one in a remark that does not say it belongs to the answer.
+  test.each([
+    ["compliance-unimported-packages", "direct: a stuck adjustment on an imported package", UNIMPORTED_DIRECT],
+    ["compliance-unimported-packages", "direct+search: the same remark, worded otherwise", UNIMPORTED_DIRECT_SEARCH],
+    ["purchasing-unpaid-pos", "direct+search: a bullet on the overpaid order", UNPAID_DIRECT_SEARCH],
+  ])("%s, %s, passes", (id, _, answer) => expect(failures(id, answer)).toEqual([]));
+
+  // Codex was told the machine's timezone (Europe/Madrid) and answered for yesterday there. Its remark gives the company's
+  // dating of Jack Herer Cartridge 1g and is no reason to fail; the record in its table, as one of yesterday's, is.
+  test("history-public-api-yesterday, direct+search: yesterday in Madrid time fails on its table, not on its remark", () => {
+    const id = "history-public-api-yesterday";
+    expect(failures(id, API_YESTERDAY_MADRID)).toEqual(["names no record the public API changed on another day"]);
+    expect(task(id).grade({ answer: API_YESTERDAY_MADRID, before: W, after: W }).find((c) => !c.pass)!.detail)
+      .toBe("lists Jack Herer Cartridge 1g with the right items without saying that it happened on another day");
+    const withoutTheRow = API_YESTERDAY_MADRID.split("\n").filter((l) => !l.includes("| Jack Herer Cartridge 1g |")).join("\n");
+    expect(failures(id, withoutTheRow)).toEqual([]);
   });
 });
 

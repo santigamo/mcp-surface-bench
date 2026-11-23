@@ -35,6 +35,7 @@ const claude: Client = {
     "--setting-sources \"\" and --strict-mcp-config: no user, project or local settings, plugins or other MCP servers",
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1, CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: no CLAUDE.md or memory files",
     "--disable-slash-commands: no skills or commands; --no-chrome; --no-session-persistence",
+    "TZ set to the suite's timezone (meta.json timezone): \"Today's date is\" is the company's date",
   ],
 
   toolSearchSetting: (toolSearch) => `ENABLE_TOOL_SEARCH=${TOOL_SEARCH[toolSearch].env}, --tools "${TOOL_SEARCH[toolSearch].tools}"`,
@@ -60,6 +61,8 @@ const claude: Client = {
         "--no-session-persistence",
       ],
       env: baseEnv({
+        // Claude Code tells the model "Today's date is …" from the local date, which TZ sets (verified on 2.1.330).
+        TZ: run.timezone,
         ENABLE_TOOL_SEARCH: ts.env,
         // Print mode already waits for servers before the first turn; this makes it explicit.
         MCP_CONNECTION_NONBLOCKING: "0",

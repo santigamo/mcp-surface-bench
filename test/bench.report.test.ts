@@ -33,10 +33,10 @@ test("report: one row per arm in the order of the command line, with the runs be
   const rows = md.split("\n").filter((l) => l.includes("tools,") && l.includes("bytes"));
   expect(rows.map((l) => l.split(" | ")[0])).toEqual(["| code", "| direct", "| direct+search"]);
   // direct: 4 runs, 3 passed (the timeout counts as graded), median of 1,3,5,2 calls = 2.5, usage from the 3 runs that have it.
-  expect(line("| direct | ", "tools,")).toContain("| direct | 4 | 3/4 | 2.5 [4] | 2.8 [4] |");
+  expect(line("| direct | ", "tools,")).toContain("| direct | 4 | 3/4 | 0/4 | 1/4 | 2.5 [4] | 2.8 [4] |");
   expect(line("| direct | ", "tools,")).toContain("| 330k [3] |");
   expect(line("| direct | ", "tools,")).toContain("| 114 tools, 381k bytes (≈95k tokens at 4 bytes each) |");
-  expect(line("| code | ", "tools,")).toContain("| code | 3 | 2/3 | 3 [3] | 3.0 [3] |");
+  expect(line("| code | ", "tools,")).toContain("| code | 3 | 2/3 | 0/3 | 1/3 | 3 [3] | 3.0 [3] |");
   expect(md).toContain("| Task | code | direct | direct+search |");
   expect(md).toContain("| t1 | 2/2 | 2/2 | 1/2 |");
   expect(md).toContain("| t2 | 0/1 | 1/2 | 1/1 |");
@@ -123,10 +123,47 @@ test("report: never regraded says nothing about it; an empty benchmark still ren
   expect(md).not.toContain("Regraded");
   const empty = renderReport(meta, []);
   expect(empty).toContain("Every call reached a tool and inputs the mock implements.");
-  expect(empty).toContain("| code | 0 | – |");
+  expect(empty).toContain("| code | 0 | – | – | – |");
+  expect(empty).toContain("## Runs that asked\n\nNone.");
 });
 
 test("runLine: one line per finished run, with the arm and its tool searches", () => {
   expect(runLine(2, 7, runs[5]!)).toBe('[2/7] t2 / code #1: fail · 20 s · server calls 3 · model calls 3 · context 12k, output 300 · $0.050 · answer: "ok"');
   expect(runLine(1, 7, runs[7]!)).toBe('[1/7] t1 / direct+search #1: pass · 20 s · server calls 2 · model calls 2 · tool searches 3 · context 40k, output 300 · $0.050 · answer: "ok"');
+});
+
+test("report: a run that asked is its own outcome everywhere a pass count appears, and listed with its question", () => {
+  const asking = (task: string, arm: string, question: string) =>
+    r(task, arm, 1, { status: "asked", question, checks: [{ name: "records the payment", pass: false }, { name: "informative", pass: false, required: false }] });
+  const two = fakeMeta({ arms: [ARMS[0]!, ARMS[2]!] });
+  two.options = { ...two.options, n: 1 };
+  const md = renderReport(two, [
+    r("pay", "direct", 1), asking("pay", "code", "Which payment method should I use: ACH, Check or Cash?"),
+    asking("menu", "direct", "Should I deactivate it?"), r("menu", "code", 1, { status: "fail", checks: [{ name: "turns it off", pass: false }] }),
+    r("both", "direct", 1), r("both", "code", 1),
+  ]);
+  const row = (arm: string) => md.split("\n").find((l) => l.startsWith(`| ${arm} | `) && l.includes("tools,"))!;
+  expect(row("direct")).toContain("| direct | 3 | 2/3 | 1/3 | 0/3 |");
+  expect(row("code")).toContain("| code | 3 | 1/3 | 1/3 | 1/3 |");
+  expect(md).toContain("## Outcomes by task");
+  expect(md).toContain("| pay | 1/1 | 0/1 (1 asked) |");
+  expect(md).toContain("| menu | 0/1 (1 asked) | 0/1 |");
+  // A pass over an ask is a win, marked; an ask against a failure is a tie, marked.
+  expect(md).toContain("| direct | code | 3 | 1 (pay (code asked)) | 0 | 2 (menu (direct asked)) |");
+  expect(md).toContain("## Runs that asked\n\nEach stopped to put a question to the user");
+  expect(md).toContain('- **pay / code #1**: "Which payment method should I use: ACH, Check or Cash?"\n  - checks it did not pass: records the payment\n');
+  // Not among the failed runs.
+  const failedSection = md.slice(md.indexOf("## Failed runs"), md.indexOf("## Informative checks"));
+  expect(failedSection).toContain("menu / code #1");
+  expect(failedSection).not.toContain("pay / code #1");
+  expect(failedSection).not.toContain("menu / direct #1");
+  expect(runLine(1, 1, asking("pay", "code", "Which method?"))).toContain('asked: "Which method?"');
+});
+
+test("report: the day of the runs, where the clients ran, and the machine's when it differs", () => {
+  expect(md).toContain("10 finished runs on 2026-11-23 in America/Los_Angeles, where the clients ran: 2 rep(s)");
+  const abroad = fakeMeta({ machine: { timezone: "Europe/Madrid", date: "2026-11-24" } });
+  expect(renderReport(abroad, runs)).toContain("on 2026-11-23 in America/Los_Angeles, where the clients ran; the machine was in Europe/Madrid, on 2026-11-24:");
+  const { timezone: _, machine: __, ...before } = fakeMeta();
+  expect(renderReport(before as ReturnType<typeof fakeMeta>, runs)).toContain("on 2026-11-23 (the machine's date: these runs were started before the runner set the clients' timezone");
 });

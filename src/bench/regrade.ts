@@ -21,6 +21,7 @@ if (meta.options.prompt) stop(`${root} ran an ad-hoc prompt: there is nothing to
 if (worldHash(suite.createWorld(meta.today)) !== meta.world.sha256) {
   console.warn("note: the suite now builds a different world for this day; the runs are graded against the one they started from (world-before.json).");
 }
+if (!meta.timezone) console.warn(`note: ${root} was started before the runner set the clients' timezone; its runs are graded as they are, in the suite's timezone, on ${meta.today}.`);
 const { pass, changes, skipped } = regradeDir(root, suite.tasks, { at: new Date().toISOString(), ...gitState() });
 
 console.log(`${root}: ${pass.runs} runs regraded at commit ${pass.commit.slice(0, 10)}${pass.dirty ? " (uncommitted changes)" : ""}; ${changes.length} verdicts changed, ${changes.filter((c) => c.from !== c.run.status).length} of them in status.`);

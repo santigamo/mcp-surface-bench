@@ -60,6 +60,7 @@ const codex: Client = {
     "always present (model catalog): exec, wait, request_user_input, collaboration tools",
     "codex exec does not report the model it used: without --model, runs record \"codex default\", which the client version fixes",
     "codex exec does not show its tool searches in its events, nor the reasoning effort it used (set by model_reasoning_effort)",
+    "TZ set to the suite's timezone (meta.json timezone): <current_date> and <timezone> are the company's",
   ],
 
   toolSearchSetting: (toolSearch) =>
@@ -91,7 +92,8 @@ const codex: Client = {
         ...settings.flatMap((s) => ["-c", s]),
         "--", run.prompt,
       ],
-      env: baseEnv({ CODEX_HOME }),
+      // Codex tells the model <current_date> and <timezone> from TZ (verified with `codex debug prompt-input` on 0.167.0).
+      env: baseEnv({ CODEX_HOME, TZ: run.timezone }),
       config: { file: join(run.dir, "codex-config.toml"), text: settings.join("\n") + "\n" },
     };
   },

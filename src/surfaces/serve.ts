@@ -1,5 +1,7 @@
 // Starts one surface of one suite as an MCP server over stdio. The benchmark runner spawns it once per run.
 //   BENCH_SURFACE=direct|code  BENCH_TODAY=YYYY-MM-DD  BENCH_RUN_DIR=<dir for trace.jsonl and world.json>
+// The runner also sets TZ to the suite's timezone. The handlers do not depend on it (every instant carries its offset
+// and every day is read in the company's timezone); it sets the local time that code run on the code surface sees.
 import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadCatalog } from "../catalog/index.ts";
