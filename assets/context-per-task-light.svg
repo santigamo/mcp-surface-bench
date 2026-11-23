@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 628" width="1200" height="628" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">Context an agent processes per task, by how a 114-tool MCP server is exposed</title>
+<desc id="d">Median tokens per task over 25 tasks. Claude Code with Opus 5.5: 467k with every tool upfront, 37k with tools deferred by the client, 26k in code mode. Codex with GPT-6.2 Sol: 370k, 103k and 64k.</desc>
+<rect x="0.5" y="0.5" width="1199" height="627" rx="16" fill="#fcfcfb" stroke="#e4e3df"/>
+<text x="56" y="96" font-size="38" font-weight="700" fill="#0b0b0b">What 114 MCP tools cost an agent, three ways</text>
+<text x="56" y="134" font-size="19" fill="#52514e">Tokens of context processed per task, median over 25 tasks. Same tools, same data, same requests.</text>
+<text x="56" y="212" font-size="21" font-weight="600" fill="#0b0b0b">Claude Code · Opus 5.5</text>
+<text x="56" y="252" font-size="16" fill="#52514e">Every tool upfront</text>
+<path d="M56 266h354a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-354z" fill="#2a78d6"/>
+<text x="426" y="285" font-size="19"><tspan font-weight="700" fill="#0b0b0b">467k</tspan></text>
+<text x="56" y="344" font-size="16" fill="#52514e">Tools deferred by the client</text>
+<path d="M56 358h24a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-24z" fill="#2a78d6"/>
+<text x="96" y="377" font-size="19"><tspan font-weight="700" fill="#0b0b0b">37k</tspan><tspan dx="10" fill="#52514e">−92%</tspan></text>
+<text x="56" y="436" font-size="16" fill="#52514e">Code mode: two tools</text>
+<path d="M56 450h16a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-16z" fill="#2a78d6"/>
+<text x="88" y="469" font-size="19"><tspan font-weight="700" fill="#0b0b0b">26k</tspan><tspan dx="10" fill="#52514e">−94%</tspan></text>
+<text x="636" y="212" font-size="21" font-weight="600" fill="#0b0b0b">Codex · GPT-6.2 Sol</text>
+<text x="636" y="252" font-size="16" fill="#52514e">Every tool upfront</text>
+<path d="M636 266h280a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-280z" fill="#2a78d6"/>
+<text x="932" y="285" font-size="19"><tspan font-weight="700" fill="#0b0b0b">370k</tspan></text>
+<text x="636" y="344" font-size="16" fill="#52514e">Tools deferred by the client</text>
+<path d="M636 358h75a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-75z" fill="#2a78d6"/>
+<text x="727" y="377" font-size="19"><tspan font-weight="700" fill="#0b0b0b">103k</tspan><tspan dx="10" fill="#52514e">−72%</tspan></text>
+<text x="636" y="436" font-size="16" fill="#52514e">Code mode: two tools</text>
+<path d="M636 450h45a4 4 0 0 1 4 4v18a4 4 0 0 1 -4 4h-45z" fill="#2a78d6"/>
+<text x="697" y="469" font-size="19"><tspan font-weight="700" fill="#0b0b0b">64k</tspan><tspan dx="10" fill="#52514e">−83%</tspan></text>
+<line x1="56" y1="552" x2="1144" y2="552" stroke="#e4e3df"/>
+<text x="56" y="586" font-size="16" fill="#8a897f">Pilot, November 2026: one run per task and arm. All three got the work done about equally.</text>
+<text x="1144" y="586" font-size="16" text-anchor="end" fill="#52514e">github.com/santigamo/mcp-surface-bench</text>
+</svg>

@@ -1,5 +1,10 @@
 # mcp-surface-bench
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/context-per-task-dark.svg">
+  <img src="assets/context-per-task-light.svg" alt="Context an agent processes per task on a 114-tool MCP server, median over 25 tasks. Claude Code with Opus 5.5: 467k tokens with every tool upfront, 37k with tools deferred by the client, 26k in code mode. Codex with GPT-6.2 Sol: 370k, 103k and 64k.">
+</picture>
+
 A benchmark for one question: when an MCP server has many tools, what does each way of showing them to an
 agent cost, and does the agent still get the work done?
 
