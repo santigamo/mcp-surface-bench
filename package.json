@@ -1,6 +1,5 @@
 {
   "name": "mcp-surface-bench",
-  "private": true,
   "type": "module",
   "scripts": {
     "catalog": "bun src/catalog/fetch.ts",
@@ -17,5 +16,7 @@
   "devDependencies": {
     "@types/bun": "^1.4.5",
     "typescript": "^7.0.2"
-  }
+  },
+  "license": "MIT",
+  "description": "What each way of exposing a large MCP server costs an agent, and whether it still gets the work done."
 }
