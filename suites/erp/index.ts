@@ -4,6 +4,7 @@ import { tasks } from "./tasks.ts";
 import { tools as catalog } from "./tools/catalog.ts";
 import { tools as commerce } from "./tools/commerce.ts";
 import { tools as compliance } from "./tools/compliance.ts";
+import { tools as costing } from "./tools/costing.ts";
 import { tools as cultivation } from "./tools/cultivation.ts";
 import { tools as directory } from "./tools/directory.ts";
 import { tools as history } from "./tools/history.ts";
@@ -18,6 +19,6 @@ export const erp: Suite<World> = {
   name: "erp",
   createWorld,
   clock,
-  handlers: [...session, ...catalog, ...inventory, ...orders, ...purchasing, ...directory, ...commerce, ...compliance, ...cultivation, ...history],
+  handlers: [...session, ...catalog, ...inventory, ...costing, ...orders, ...purchasing, ...directory, ...commerce, ...compliance, ...cultivation, ...history],
   tasks,
 };
